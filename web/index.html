@@ -30,17 +30,19 @@
       label {
         display: block;
         font-size: 13px;
-        color: #555;
-        margin-bottom: 4px;
+        font-weight: 600;
+        margin-bottom: 6px;
       }
-      .row {
-        display: flex;
-        gap: 12px;
-        flex-wrap: wrap;
-        align-items: flex-end;
+      .field {
+        margin-bottom: 18px;
       }
-      .row > div {
-        flex: 1 1 120px;
+      .field[hidden] {
+        display: none;
+      }
+      .hint {
+        font-size: 12px;
+        color: #6b6b6b;
+        margin: 6px 0 0;
       }
       select,
       input,
@@ -121,37 +123,43 @@
 
     <hr />
 
-    <div class="row">
-      <div>
-        <label for="mode">Puzzle</label>
-        <select id="mode">
-          <option value="random">/random — server chọn từ</option>
-          <option value="daily">/daily — puzzle hôm nay</option>
-          <option value="word">/word — tôi tự đặt đáp án</option>
-        </select>
-      </div>
-      <div>
-        <label for="strategy">Thuật toán</label>
-        <select id="strategy">
-          <option value="entropy">entropy (99,0%)</option>
-          <option value="minimax">minimax (99,7%)</option>
-          <option value="freq">freq (90,7%)</option>
-        </select>
-      </div>
+    <div class="field">
+      <label for="mode">1 · Chọn puzzle</label>
+      <select id="mode">
+        <option value="random">/random — server chọn từ, ta không biết</option>
+        <option value="daily">/daily — puzzle của hôm nay</option>
+        <option value="word">/word — tôi tự đặt đáp án để kiểm tra</option>
+      </select>
+      <p class="hint" id="mode-hint"></p>
     </div>
 
-    <div class="row" style="margin-top: 12px">
-      <div>
-        <label for="seed">Seed <span class="meta">(bỏ trống = tự sinh)</span></label>
-        <input id="seed" type="number" min="0" placeholder="ví dụ 1 → fiery" />
-      </div>
-      <div>
-        <label for="target">Đáp án <span class="meta">(chỉ cho /word)</span></label>
-        <input id="target" placeholder="ví dụ apple" />
-      </div>
-      <div style="flex: 0 0 120px">
-        <button id="solve">Giải</button>
-      </div>
+    <div class="field" id="seed-field">
+      <label for="seed">2 · Seed</label>
+      <input id="seed" type="number" min="0" placeholder="bỏ trống để tự sinh — thử 1, 42, 777" />
+      <p class="hint">
+        API không lưu trạng thái: thiếu seed thì mỗi request là một từ khác nhau, nên phải ghim một
+        seed cho cả phiên.
+      </p>
+    </div>
+
+    <div class="field" id="target-field">
+      <label for="target">2 · Đáp án</label>
+      <input id="target" placeholder="ví dụ apple" maxlength="5" />
+      <p class="hint">Ta tự đặt đáp án, nên đây là môi trường kiểm tra có kiểm soát.</p>
+    </div>
+
+    <div class="field">
+      <label for="strategy" id="label-strategy">3 · Thuật toán chọn lượt đoán</label>
+      <select id="strategy">
+        <option value="entropy">entropy — giải được 99,0%, trung bình 4,22 lượt</option>
+        <option value="minimax">minimax — 99,7%, nhưng 4,29 lượt</option>
+        <option value="freq">freq — chỉ 90,7%, dùng làm mốc so sánh</option>
+      </select>
+    </div>
+
+    <div class="field">
+      <button id="solve">Giải</button>
+      <p class="hint" id="url-hint"></p>
     </div>
 
     <hr />
@@ -187,9 +195,11 @@
         status.className = 'status';
         status.textContent = 'Đang gọi API…';
 
-        const params = new URLSearchParams({ mode: el('mode').value, strategy: el('strategy').value });
-        if (el('seed').value) params.set('seed', el('seed').value);
-        if (el('target').value) params.set('target', el('target').value.trim());
+        // Chỉ gửi tham số thuộc về mode đang chọn, để seed cũ không lẫn sang /word.
+        const mode = el('mode').value;
+        const params = new URLSearchParams({ mode, strategy: el('strategy').value });
+        if (mode === 'random' && el('seed').value) params.set('seed', el('seed').value);
+        if (mode === 'word') params.set('target', el('target').value.trim());
 
         try {
           const response = await fetch(`${API}/api/solve?${params}`);
@@ -214,12 +224,39 @@
         }
       }
 
+      const MODES = {
+        random: { hint: 'Server chọn một từ ngẫu nhiên và chỉ trả về feedback. Solver phải tự suy ra.' },
+        daily: { hint: 'Một từ cố định cho cả ngày hôm nay, cũng không được tiết lộ.' },
+        word: { hint: 'Server biết đáp án ta đưa và chấm điểm lượt đoán dựa trên đó.' },
+      };
+
+      /** Ô nào không liên quan tới mode đang chọn thì ẩn hẳn, không chỉ vô hiệu hoá. */
+      function syncForm() {
+        const mode = el('mode').value;
+
+        el('seed-field').hidden = mode !== 'random';
+        el('target-field').hidden = mode !== 'word';
+        el('mode-hint').textContent = MODES[mode].hint;
+
+        // Mode daily không có bước 2 nào, nên đánh số lại để không nhảy từ 1 sang 3.
+        el('label-strategy').textContent = `${mode === 'daily' ? 2 : 3} · Thuật toán chọn lượt đoán`;
+
+        // Mode word bắt buộc có đáp án, nên chặn ngay ở nút thay vì để server trả lỗi.
+        const target = el('target').value.trim();
+        el('solve').disabled = mode === 'word' && target.length !== 5;
+
+        el('url-hint').textContent = `Sẽ gọi: GET ${describeEndpoint(mode, target)}`;
+      }
+
+      function describeEndpoint(mode, target) {
+        if (mode === 'word') return `/word/${target || '{đáp án}'}?guess=…`;
+        if (mode === 'daily') return '/daily?guess=…&size=5';
+        return `/random?guess=…&size=5&seed=${el('seed').value || '{tự sinh}'}`;
+      }
+
       el('solve').addEventListener('click', run);
-      el('mode').addEventListener('change', () => {
-        el('seed').disabled = el('mode').value !== 'random';
-        el('target').disabled = el('mode').value !== 'word';
-      });
-      el('mode').dispatchEvent(new Event('change'));
+      for (const id of ['mode', 'seed', 'target']) el(id).addEventListener('input', syncForm);
+      syncForm();
     </script>
   </body>
 </html>
