@@ -58,9 +58,22 @@ function toFeedback(results: GuessResult[], guess: string): Feedback {
 
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** Ta tự chọn từ bí mật ⇒ dùng làm test oracle, không phải để chơi. */
+/**
+ * Ta tự chọn từ bí mật ⇒ dùng làm test oracle, không phải để chơi.
+ *
+ * Chặn target chứa ký tự ngoài a–z ngay tại đây: API chỉ nhận guess gồm chữ cái, nên một ô
+ * chứa chữ số hay dấu là **không thể đoán ra được** — không phải giới hạn của thuật toán.
+ * Thà báo ngay còn hơn để solver dò 40 lượt rồi mới chịu.
+ */
 export function createWordOracle(target: string): Oracle {
-  return (guess) => request(`/word/${encodeURIComponent(target.toLowerCase())}`, guess);
+  const normalised = target.trim().toLowerCase();
+  if (!/^[a-z]+$/.test(normalised)) {
+    throw new Error(
+      `Từ bí mật "${target}" chứa ký tự ngoài a–z. API chỉ nhận guess gồm chữ cái, nên không guess nào ` +
+        `khớp được ô đó — hãy dùng từ chỉ gồm chữ cái.`,
+    );
+  }
+  return (guess) => request(`/word/${encodeURIComponent(normalised)}`, guess);
 }
 
 /**
