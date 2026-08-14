@@ -6,6 +6,15 @@ even when the answer is not in any dictionary.
 
 TypeScript on Node 22 with **zero runtime dependencies and no build step**.
 
+- [How the API works](#how-the-api-works) — three endpoints, one oracle
+- [Finding 1](#finding-1-random-is-stateless-and-needs-a-pinned-seed) — `/random` needs a pinned seed
+- [Finding 2](#finding-2-scoring-is-per-slot-not-standard-wordle) — scoring is not standard Wordle
+- [Finding 3](#finding-3-the-secret-word-is-often-not-a-dictionary-word) — secrets are often not dictionary words
+- [Finding 4](#finding-4-the-per-slot-rule-guarantees-a-way-out) — a dictionary-free fallback
+- [Algorithm](#algorithm) — filtering, then `freq` / `entropy` / `minimax`
+- [Results](#results) — 60/60 live, 99.0% inference
+- [References](#references) — every borrowed idea, with a source
+
 ```
 $ npm run solve:random
 
@@ -62,8 +71,8 @@ npm start -- --mode word --target apple   # controlled test: we pick the answer
 
 npm run web          # browser UI on http://localhost:3000
 
-npm test             # 29 tests, no network needed
-npm run test:live    # 7 integration tests against the real API
+npm test             # 41 tests, no network needed
+npm run test:live    # 8 integration tests against the real API
 npm run typecheck    # tsc --noEmit
 npm run bench        # measure solve rate and average guesses
 ```
@@ -261,6 +270,30 @@ and leaves all formatting in one place.
 
 ## Algorithm
 
+Two phases, one loop. Phase 1 is the interesting one: it treats the puzzle as a
+search over a dictionary. Phase 2 is a guaranteed fallback that needs no dictionary
+at all (Finding 4). Every guess in both phases is sent to the live Votee API.
+
+```
+candidates ← the 12,578-word dictionary
+for attempt in 1..6:                                          # inference
+    guess    ← pickGuess(candidates)                          # src/strategy.ts
+    feedback ← oracle(guess)                                  # one HTTP request
+    if every slot is correct: return guess
+    candidates ← { w ∈ candidates | score(guess, w) = feedback }
+    if candidates is empty: break                             # secret is not in the list
+if still unsolved:
+    resolve the remaining slots letter by letter              # src/probe.ts
+```
+
+`pickGuess` is where the three strategies live. The rest of this section explains
+that choice. Filtering itself is a one-liner, covered first because the strategies
+are just different ways of *predicting* how well a guess will filter.
+
+Sources for each idea are listed in [References](#references). Inline citations
+point there; nothing is used without saying where it came from, and nothing is
+copied without saying how it was changed.
+
 ### Candidate filtering
 
 If candidate *X* were the secret word, the server would have had to return `score(guess, X)`. It
@@ -289,36 +322,185 @@ narration uses the structures. `solver.ts` does not import `constraints.ts` at a
 
 ### Guess selection
 
-Any guess **partitions** the remaining candidates by the feedback pattern each would produce. The
-server's answer picks one partition, and that partition becomes the new candidate set. Three ways to
-score a guess, all sharing that partition step:
+#### Partitioning: the one idea all three strategies share
 
-| Strategy | Rule | Optimises |
+Take a guess and the current candidate set. For **each** candidate, ask what feedback the server would
+return *if that candidate were the answer*, and group candidates that would produce the same string.
+
+Guessing `tares` against the full dictionary splits 12,578 words into **211 groups, the largest holding
+830 words**. The server's reply reveals which group we are in, and that group *becomes* the new
+candidate set. So a good guess is one that splits finely.
+
+```ts
+function partitionSizes(guess: string, candidates: string[]): number[] {
+  const buckets = new Map<string, number>();
+  for (const candidate of candidates) {
+    const key = patternKey(guess, candidate);
+    buckets.set(key, (buckets.get(key) ?? 0) + 1);
+  }
+  return [...buckets.values()];
+}
+```
+
+This returns something like `[830, 512, 401, …]`. **The three strategies differ only in how they score
+that array of numbers.**
+
+#### `freq` — positional letter frequency
+
+No partitioning at all. Count, for each slot, how many candidates have each letter there; a word's
+score is the **sum** of its letters' frequencies at their own slots, halved once per repeated letter.
+Highest score wins.
+
+```ts
+score += frequency[i]!.get(word[i]!) ?? 0;
+const duplicates = size - new Set(word).size;
+scores.set(word, score * 0.5 ** duplicates);
+```
+
+Repeats are penalised because the per-slot rule (Finding 2) means `present` carries no count
+information: guessing `eeeee` does not reveal "the target has two e's", it just re-asks one question.
+
+Being a proxy, it is measurably imperfect. At turn one it prefers `cares` over `tares`:
+
+| Word | `freq` score | Actual entropy |
 | --- | --- | --- |
-| `entropy` | maximise `Σ −p·log₂p` | average information gained (default) |
-| `minimax` | minimise the largest partition | worst case |
-| `freq` | maximise positional letter frequency, penalising repeats | nothing directly — it is a proxy |
+| `cares` | **10,335** ← chosen | 5.9679 bits |
+| `bares` | 10,323 | 5.8677 bits |
+| `pares` | 10,258 | 5.9695 bits |
+| `tares` | 10,227 | **6.2024 bits** ← actually the best |
 
-Ties prefer a guess that is itself still a candidate, then fall back to alphabetical order, so results
-never depend on input ordering.
+It ranks `cares` first, yet `tares` extracts more information. `freq` never looks at how the candidate
+set actually splits — that is precisely what makes it cheap, and what makes it wrong sometimes.
+
+The idea of scoring words by how common their letters are *in each slot* comes from
+[The Dodgy Engineer (2022)](#references). The formula used here is **not** the one in
+that video — see [References](#references) for the departure and why.
+
+#### `entropy` — maximise expected information (default)
+
+With group sizes `n₁, n₂, …` summing to `N`, let `pᵢ = nᵢ / N` and maximise Shannon's
+entropy ([Shannon 1948](#references)):
+
+```
+H = Σ −pᵢ · log₂ pᵢ        bits
+```
+
+One bit halves the search space, so `tares` at 6.2024 bits divides 12,578 by roughly `2^6.2 ≈ 74` on
+average. `−log₂ p` is the surprise of an outcome; `H` is expected surprise, and it peaks when the
+groups are **equal** — that is, when no group is left bloated. Applying this specifically to Wordle
+follows [Sanderson / 3Blue1Brown (2022)](#references).
+
+#### `minimax` — make the worst case as good as possible
+
+Ignore the average; minimise the largest group.
+
+```
+W = max(n₁, n₂, …)
+```
+
+"Minimise the maximum": assume the unluckiest reply, then choose the guess that makes it least bad.
+This is Knuth's technique for Mastermind ([Knuth 1976](#references)) applied to a five-letter alphabet.
+
+#### Where entropy and minimax actually disagree
+
+A real state, from solving `aahed`, turn 5, 15 candidates remaining:
+
+```
+aahed, baaed, baked, bayed, dazed, eaved, faked, faxed,
+fayed, fazed, gaged, gazed, hayed, hazed, oaked
+```
+
+| Strategy | Picks | Entropy | Largest group | Groups |
+| --- | --- | --- | --- | --- |
+| `entropy` | `hazed` | **1.688 bits** | 9 | 5 |
+| `minimax` | `fazed` | 1.673 bits | **8** | 4 |
+
+The trade-off in one table: `hazed` learns more on average but accepts a worse worst case; `fazed`
+gives up a little average gain to cap the damage at 8. Neither is "correct" — they optimise different
+things. Another instance, solving `araks` at turn 3 with 26 candidates: `entropy` picks `draps`
+(largest group 14), `minimax` picks `craps` (largest group 12).
+
+#### Determinism and the cost ceiling
+
+Ties prefer a guess that is itself still a candidate — it keeps the chance of winning this turn, which
+a non-candidate cannot — and then fall back to alphabetical order. Knuth's original formulation makes
+the same choice for the same reason. The alphabetical step makes results independent of input
+ordering, so benchmarks are reproducible and tests do not flake;
+`test/unit/strategy.test.ts` asserts it.
 
 Partitioning costs `O(|G|·|C|·n)`, so above 300 remaining candidates the solver drops to `freq`.
 Raising that limit to 2000 was measured and did **not** help (4.20 vs 4.17 average) while doubling
 runtime, so 300 stayed.
 
-Two refinements matter more than they look:
+#### Refinement 1: the opening word is computed, not copied
 
-- **Cached opening.** `scripts/best-opening.ts` computes the highest-entropy first guess over the full
-  dictionary and writes `data/opening.json`. The answer is **`tares` at 6.2024 bits**, ahead of
-  `lares` (6.1560) and `rales` (6.1206). It is computed, not copied from a blog post — and under the
-  per-slot rule it beats `soare`, the usual optimum for standard Wordle, which lands 7th here.
-  Encoding patterns as base-3 integers counted in a typed array makes the full 12,578² sweep run in
-  3 seconds.
-- **Probe guesses.** With few candidates that differ in only one slot — `doges`, `doles`, `domes`,
-  `dopes`, `doses`, `dotes`, `doves`, `dozes` — guessing inside the set eliminates one word per turn
-  and runs out the clock. When 30 or fewer candidates remain and at least two guesses are left, the
-  pool widens to the whole dictionary so a word that *cannot* be the answer can still split several
-  candidates at once. Step 4 of the `fraud` run above (`amend`) is exactly this.
+Turn one always faces the same candidate set, so the answer never changes — compute it once and cache
+it in `data/opening.json`. `scripts/best-opening.ts` sweeps all 12,578² pairs:
+
+| Word | Entropy | Largest group |
+| --- | --- | --- |
+| **`tares`** | **6.2024 bits** | 830 |
+| `lares` | 6.1560 | 801 |
+| `rales` | 6.1206 | 801 |
+| `soare` | 6.0684 (7th) | 737 |
+| `arise` | 5.7798 | 844 |
+| `crane` | 5.3534 | 1,517 |
+| `adieu` | 4.9628 | 1,660 |
+
+`soare` is the celebrated optimum for *standard* Wordle, and here it only ranks 7th — because this API
+scores per-slot rather than by Wordle's duplicate allocation. Copying an opening from a blog post would
+mean optimising for a different game. The [NYT tips article](#references) is why an opening word was
+even considered; the numbers in the table come from `npm run build:opening`, not from that article.
+`adieu`, widely believed strong for its vowels, is the worst row in the table: 4.96 bits and a worst
+group of 1,660 words.
+
+Encoding each pattern as a base-3 integer and counting it in a typed array keeps the full sweep at
+**2.7 seconds** instead of allocating 158 million strings.
+
+#### Refinement 2: probe guesses — deliberately guessing a word that cannot win
+
+Nine candidates remain, differing in exactly one slot:
+
+```
+doges, doles, domes, dopes, dores, doses, dotes, doves, dozes
+```
+
+Guess inside that set, say `doges`: win outright, or else the other eight **all** return `c c a c c`
+and stay indistinguishable. One elimination per turn, and the clock runs out.
+
+| Guess | Largest group | Groups | Entropy |
+| --- | --- | --- | --- |
+| `doges` (a candidate) | 8 | 2 | 0.503 bits |
+| `doles` (a candidate) | 8 | 2 | 0.503 bits |
+| **`glitz`** (not a candidate) | **5** | **5** | **1.880 bits** |
+
+`glitz` cannot possibly be the answer — it does not even contain `d`, `o`, `e` or `s`. But it carries
+`g`, `l`, `t` and `z`, four of the family's distinguishing letters at once, separating `doges` /
+`doles` / `dotes` / `dozes` in a single turn: 3.7× the information, for zero chance of winning
+immediately.
+
+The pool therefore widens to the whole dictionary when **30 or fewer candidates remain and more than
+one guess is left** — the second condition matters, because information bought on the last turn can
+never be spent. Step 4 of the `fraud` run above (`amend`) is exactly this. `freq` cannot discover such
+guesses at all, since it has no notion of partitioning.
+
+#### The three strategies at a glance
+
+| | `freq` | `entropy` (default) | `minimax` |
+| --- | --- | --- | --- |
+| Optimises | positional letter frequency | expected information | the worst remaining group |
+| Formula | `Σ freq[i][letter] · 0.5^repeats` | `Σ −p·log₂p` | `max(nᵢ)` |
+| Direction | maximise | maximise | **minimise** |
+| Partitions the set | no | yes | yes |
+| Source | [Dodgy Engineer 2022](#references), adapted | [Shannon 1948](#references), [3Blue1Brown 2022](#references) | [Knuth 1976](#references) |
+| Solved (sample 300) | 90.7% | 99.3% | 99.7% |
+| Average guesses | 4.28 | 4.18 | 4.29 |
+| Time for 300 games | 0.6s | 10.9s | 12.4s |
+| Role | fallback when \|C\| > 300; baseline | **default** — fastest on average | when failing a game is worse than taking one extra guess |
+
+`entropy` is the default because the task is to find the word quickly. `minimax` solves a *slightly*
+higher fraction (99.7% vs 99.3%) at the cost of 0.11 extra guesses on average — the expected
+trade-off, since it spends budget protecting the tail. Switch with `--strategy`.
 
 ## Results
 
@@ -375,7 +557,7 @@ With `n = 5` and `|C|` remaining candidates:
 | Filtering candidates | `O(|C|·n²)` |
 | `freq` selection | `O(|C|·n)` |
 | `entropy` / `minimax` selection | `O(|G|·|C|·n²)`, capped at `|C| ≤ 300` |
-| Opening word sweep (dev-only) | `O(|D|²·n)`, 3s for 12,578 words via base-3 encoding |
+| Opening word sweep (dev-only) | `O(|D|²·n)`, 2.7s for 12,578 words via base-3 encoding |
 
 ## Testing
 
@@ -399,19 +581,49 @@ filters [`word-list`](https://github.com/sindresorhus/word-list) down to **12,57
 and writes `data/words5.txt`, which is committed so the solver has no runtime dependency. The script
 fails loudly if the result falls outside 10,000–20,000 words or omits any known ground-truth answer.
 
-## Attribution
+## References
+
+### Algorithms
+
+| Idea | Source | Used here as |
+| --- | --- | --- |
+| Entropy `H = Σ −p·log₂p` | Claude E. Shannon, [*A Mathematical Theory of Communication*](https://doi.org/10.1002/j.1538-7305.1948.tb01338.x), *Bell System Technical Journal* 27(3), 1948, pp. 379–423 ([PDF](https://archive.org/details/bstj27-3-379)) | `entropy` in `src/strategy.ts` |
+| Wordle as an information-theory problem | Grant Sanderson (3Blue1Brown), [*Solving Wordle using information theory*](https://www.3blue1brown.com/lessons/wordle/), Feb 2022 ([video](https://www.youtube.com/watch?v=v68zYyaEmEA)) | Choosing entropy over a hand-rolled heuristic, and reporting in bits |
+| Minimax over partition sizes; prefer a still-possible guess on ties | Donald E. Knuth, [*The Computer as Master Mind*](https://janmr.com/refs/knuth-mastermind76/), *Journal of Recreational Mathematics* 9(1), 1976, pp. 1–6 ([PDF](https://ia804602.us.archive.org/10/items/pdfy-4zbExU0jr9Y81AAs/knuth-mastermind_text.pdf)) | `minimax` and the tie-break in `best()` |
+| Positional letter-frequency scoring | The Dodgy Engineer, [*Solving Wordle in under 3 guesses with python*](https://wordle.plus/solving-wordle-in-under-3-guesses-with-python/), 23 May 2022 ([channel](https://www.youtube.com/c/TheDodgyEngineer/)). Reached via a NotebookLM summary of the video. | `freq` — **adapted, see below** |
+| Opening-word choice and spreading uncommon letters | [NYT, *Best Wordle Tips*](https://www.nytimes.com/2022/02/10/crosswords/best-wordle-tips.html), 10 Feb 2022 | Background only. The opening word here is **computed**, not taken from it |
+
+**Where this implementation deliberately departs from its source.** The positional-frequency video
+scores `Π(maxFreq − freq)` and **minimises**. That formula collapses: as soon as any slot reaches
+`maxFreq` the whole product becomes 0, so a large set of words tie at zero and the pick becomes
+effectively arbitrary. `src/strategy.ts` instead **sums** positional frequencies and maximises, with a
+`0.5^duplicates` penalty the original does not have — needed because this API scores per slot, so
+repeated letters carry almost no information (Finding 2). The video also reports averaging 2.95 guesses;
+that figure is not reproducible here. Measured on *this* dictionary, `freq` averages 4.28 guesses at a
+90.7% solve rate.
+
+Likewise, the well-known optimal openers from standard-Wordle write-ups (`soare`, `crane`, `adieu`)
+are **not** used. They optimise Wordle's duplicate-allocation rule; under this API's per-slot rule the
+computed optimum is `tares`, and `soare` ranks 7th.
+
+### Data
 
 - Dictionary: [`word-list`](https://github.com/sindresorhus/word-list) (MIT) by Sindre Sorhus, derived
   from [SCOWL](http://wordlist.aspell.net/) by Kevin Atkinson.
-- Positional letter-frequency idea: **The Dodgy Engineer** on YouTube. Adapted, not copied: the
-  original scores `Π(maxFreq − freq)` and minimises, which collapses to zero whenever any slot hits
-  `maxFreq`, leaving many words tied and the choice effectively arbitrary. This implementation sums
-  positional frequencies and maximises instead.
-- Entropy framing: **3Blue1Brown**'s information-theory treatment of Wordle.
-- Opening-word and letter-spread heuristics: [NYT, *Best Wordle Tips*](https://www.nytimes.com/2022/02/10/crosswords/best-wordle-tips.html).
-- All API findings above are original black-box observations, reproducible via `npm run test:live`.
-- AI assistance was used while writing this code. The API investigation, the design decisions, and
-  the measured comparisons are documented here so each can be checked independently.
+- Coverage comparison in Finding 3 used [`dwyl/english-words`](https://github.com/dwyl/english-words)
+  (`words_alpha.txt`, 15,921 five-letter words) — it covers 6 of the 9 out-of-dictionary targets, and
+  is **not** shipped.
+- API contract: [Votee Wordle API docs](https://wordle.votee.dev:8000/redoc).
+
+### Original work
+
+- Findings 1–4 are original black-box observations of this API, not documented anywhere upstream.
+  Each is reproducible: `npm run test:live` asserts all of them.
+- Every number in this README was measured on this machine and can be regenerated with
+  `npm run bench`, `npm run build:opening`, or the named test files. None are quoted from a third party.
+- AI assistance was used while writing this code. The API investigation, the design decisions and the
+  measured comparisons are documented here specifically so each can be checked independently rather
+  than taken on trust.
 
 ## Limitations and possible improvements
 
