@@ -33,6 +33,21 @@ dictionary: 12,578 words
 SOLVED  "fraud"  in 5 guesses  (1.1s)
 ```
 
+## Every guess goes to the Votee API
+
+All three documented endpoints are used, and nothing else plays the puzzle:
+
+| Endpoint | Used by | Verified by |
+| --- | --- | --- |
+| `GET /random` | `npm run solve:random`, web UI | `test/live/api.test.ts` solves seeds 1, 42, 777 end to end |
+| `GET /daily` | `npm run solve:daily`, web UI | `test/live/api.test.ts` solves today's puzzle |
+| `GET /word/{word}` | `npm start -- --mode word`, web UI | ten-case contract test against the live API |
+
+A local scorer mirrors the API's rule so the algorithm can be unit-tested and benchmarked without
+issuing thousands of requests — benchmarking 1000 games would otherwise take about 4,200 calls and
+15 minutes of hammering the server. The contract test exists precisely so that shortcut stays honest:
+it replays all ten cases against the real API and fails if the local model ever disagrees.
+
 ## Quick start
 
 Requires **Node ≥ 22.18** (runs `.ts` files natively — no `tsc`, `tsx`, or bundler involved).
@@ -44,11 +59,29 @@ npm run solve:random # hidden word chosen by the server
 npm run solve:daily  # today's puzzle
 npm start -- --mode word --target apple   # controlled test: we pick the answer
 
+npm run web          # browser UI on http://localhost:3000
+
 npm test             # 29 tests, no network needed
 npm run test:live    # 7 integration tests against the real API
 npm run typecheck    # tsc --noEmit
 npm run bench        # measure solve rate and average guesses
 ```
+
+### Browser UI
+
+`npm run web` starts a ~70-line `node:http` server that serves `web/index.html` and exposes two
+endpoints. It is a thin layer over the same solver the CLI uses, so there is no second copy of the
+algorithm to keep in sync:
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /api/solve?mode=&seed=&target=&strategy=` | Runs a full solve, returns the guess history |
+| `GET /api/guess?mode=&guess=&target=&seed=` | Forwards a single guess, returns raw feedback |
+
+The page picks a puzzle, a strategy, and an optional seed, then reveals each guess as the candidate
+set narrows. Opening it through a separate static server such as VS Code Live Server also works — the
+API responses allow any origin, and the page falls back to `http://localhost:3000` when it is not
+served from that port.
 
 ### CLI options
 
@@ -173,7 +206,9 @@ solve({ oracle }) ──┼── createRandomOracle(seed)  → /random?seed=…
 | `src/solver.ts` | The game loop. Knows nothing about HTTP, prints nothing |
 | `src/constraints.ts` | Derives human-readable knowledge — **for display only** |
 | `src/words.ts` | Loads the dictionary and the cached opening word |
-| `src/cli.ts` | Argument parsing, rendering, benchmarking |
+| `src/bench.ts` | Runs many games offline, returns numbers without printing |
+| `src/cli.ts` | Argument parsing and rendering |
+| `src/server.ts` | Optional HTTP layer for the browser UI |
 
 `api.ts` converts `{slot, guess, result}[]` into a positional `Mark[]` immediately, keyed by `slot`
 rather than array order, and throws if any slot is missing. Everything inland deals only in `Mark[]`.

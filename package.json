@@ -12,6 +12,7 @@
     "solve:random": "node src/cli.ts --mode random",
     "solve:daily": "node src/cli.ts --mode daily",
     "bench": "node src/cli.ts --mode bench",
+    "web": "node src/server.ts",
     "test": "node --test \"test/unit/*.test.ts\"",
     "test:live": "node --test \"test/live/*.test.ts\"",
     "typecheck": "tsc --noEmit",
