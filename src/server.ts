@@ -82,4 +82,20 @@ function json(res: import('node:http').ServerResponse, status: number, body: unk
   res.end(JSON.stringify(body));
 }
 
+/**
+ * Mặc định Node ném stack trace cho EADDRINUSE, khiến nguyên nhân thật bị chôn: một server cũ
+ * còn sống với code cũ trong bộ nhớ, nên mọi sửa đổi trông như không có tác dụng.
+ */
+server.on('error', (error: NodeJS.ErrnoException) => {
+  if (error.code !== 'EADDRINUSE') throw error;
+  console.error(
+    `\nPort ${PORT} đang bị một tiến trình khác giữ — gần như chắc chắn là server cũ chưa tắt.\n` +
+      `Nó vẫn chạy CODE CŨ trong bộ nhớ, nên sửa file sẽ không có tác dụng gì.\n\n` +
+      `  Windows : Get-NetTCPConnection -LocalPort ${PORT} -State Listen | %{ Stop-Process -Id $_.OwningProcess -Force }\n` +
+      `  macOS   : kill -9 $(lsof -ti tcp:${PORT})\n` +
+      `  hoặc    : PORT=${PORT + 1} npm run web\n`,
+  );
+  process.exit(1);
+});
+
 server.listen(PORT, () => console.log(`\nVotee Wordle Solver — http://localhost:${PORT}\n`));
