@@ -29,17 +29,35 @@ test('history ghi lại đủ từng lượt', async () => {
   assert.deepEqual(remaining, [...remaining].sort((a, b) => b - a));
 });
 
-test('từ ngoài từ điển thì báo lỗi rõ ràng, không đoán bừa', async () => {
+test('từ ngoài từ điển vẫn tìm ra được nhờ chuyển sang dò', async () => {
+  const result = await solve({ oracle: createLocalOracle('zzzzz'), words, firstGuess });
+  assert.ok(result.solved);
+  assert.equal(result.answer, 'zzzzz');
+});
+
+test('tắt fallback thì báo lỗi rõ ràng, không đoán bừa', async () => {
   await assert.rejects(
-    () => solve({ oracle: createLocalOracle('zzzzz'), words, firstGuess }),
+    () => solve({ oracle: createLocalOracle('zzzzz'), words, firstGuess, fallback: false }),
     DictionaryGapError,
   );
 });
 
-test('hết lượt thì trả solved=false chứ không throw', async () => {
-  const result = await solve({ oracle: createLocalOracle('doves'), words, firstGuess, maxAttempts: 2 });
+test('hết lượt suy luận mà tắt fallback thì trả solved=false chứ không throw', async () => {
+  const result = await solve({
+    oracle: createLocalOracle('doves'),
+    words,
+    firstGuess,
+    maxAttempts: 2,
+    fallback: false,
+  });
   assert.equal(result.solved, false);
   assert.equal(result.answer, null);
+});
+
+test('hết lượt suy luận thì dò tiếp cho tới khi ra', async () => {
+  const result = await solve({ oracle: createLocalOracle('doves'), words, firstGuess, maxAttempts: 2 });
+  assert.ok(result.solved);
+  assert.equal(result.answer, 'doves');
 });
 
 /**
@@ -53,7 +71,8 @@ test('benchmark: giải được ≥ 97% và trung bình ≤ 4,4 lượt', async
   let totalAttempts = 0;
 
   for (const target of targets) {
-    const result = await solve({ oracle: createLocalOracle(target), words, firstGuess });
+    // fallback tắt: đo riêng phần suy luận. Bật lên thì luôn 100% và số mất ý nghĩa.
+    const result = await solve({ oracle: createLocalOracle(target), words, firstGuess, fallback: false });
     if (result.solved) {
       solved++;
       totalAttempts += result.attempts;

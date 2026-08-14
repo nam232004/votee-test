@@ -145,7 +145,11 @@
     <div class="field" id="target-field">
       <label for="target">2 · Đáp án</label>
       <input id="target" placeholder="ví dụ apple" maxlength="5" />
-      <p class="hint">Ta tự đặt đáp án, nên đây là môi trường kiểm tra có kiểm soát.</p>
+      <p class="hint">
+        Ta tự đặt đáp án, nên đây là môi trường kiểm tra có kiểm soát. Không cần là từ có nghĩa —
+        <code>kshjc</code> hay <code>zzzzz</code> đều giải được. Chỉ nhận chữ a–z, vì API chỉ nhận
+        guess gồm chữ cái.
+      </p>
     </div>
 
     <div class="field">
@@ -180,11 +184,26 @@
         feedback.map((mark, i) => `<div class="tile ${mark}">${guess[i]}</div>`).join('');
 
       function renderStep(step) {
+        const detail =
+          step.phase === 'probe'
+            ? `còn ${step.unresolvedSlots} ô chưa xác định`
+            : `còn ${step.remaining.toLocaleString('en-US')} từ khả thi`;
+
         const node = document.createElement('div');
         node.className = 'step';
         node.innerHTML = `
           <div class="tiles">${tiles(step.guess, step.feedback)}</div>
-          <div class="meta">#${step.attempt} · còn ${step.remaining.toLocaleString('en-US')} từ khả thi</div>`;
+          <div class="meta">#${step.attempt} · ${detail}</div>`;
+        steps.append(node);
+      }
+
+      /** Giai đoạn dò chỉ xuất hiện khi từ bí mật ngoài từ điển — cần nói rõ cho người xem. */
+      function renderPhaseNotice() {
+        const node = document.createElement('p');
+        node.className = 'hint';
+        node.style.margin = '14px 0';
+        node.textContent =
+          'Từ bí mật không có trong từ điển. Chuyển sang dò từng ô — chậm hơn nhưng luôn tìm ra.';
         steps.append(node);
       }
 
@@ -207,9 +226,14 @@
           if (!response.ok) throw new Error(data.error);
 
           // Hiện dần từng lượt để thấy được quá trình thu hẹp.
+          let phase = 'inference';
           for (const step of data.history) {
+            if (step.phase !== phase) {
+              phase = step.phase;
+              renderPhaseNotice();
+            }
             renderStep(step);
-            await new Promise((resolve) => setTimeout(resolve, 350));
+            await new Promise((resolve) => setTimeout(resolve, data.history.length > 8 ? 120 : 350));
           }
 
           const seed = data.seed ? ` · seed ${data.seed}` : '';
@@ -241,9 +265,10 @@
         // Mode daily không có bước 2 nào, nên đánh số lại để không nhảy từ 1 sang 3.
         el('label-strategy').textContent = `${mode === 'daily' ? 2 : 3} · Thuật toán chọn lượt đoán`;
 
-        // Mode word bắt buộc có đáp án, nên chặn ngay ở nút thay vì để server trả lỗi.
-        const target = el('target').value.trim();
-        el('solve').disabled = mode === 'word' && target.length !== 5;
+        // Mode word bắt buộc có đáp án đúng 5 chữ a–z, nên chặn ngay ở nút thay vì để server
+        // trả lỗi. Ký tự ngoài a–z là không thể đoán ra: API không nhận guess như vậy.
+        const target = el('target').value.trim().toLowerCase();
+        el('solve').disabled = mode === 'word' && !/^[a-z]{5}$/.test(target);
 
         el('url-hint').textContent = `Sẽ gọi: GET ${describeEndpoint(mode, target)}`;
       }

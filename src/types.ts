@@ -14,7 +14,12 @@ export type SolveStep = {
   attempt: number;
   guess: string;
   feedback: Feedback;
+  /** Số từ trong từ điển còn khả thi. Không có nghĩa ở giai đoạn `probe`. */
   remaining: number;
+  /** `inference` suy luận theo từ điển; `probe` dò từng ô, không cần từ điển. */
+  phase: 'inference' | 'probe';
+  /** Số ô chưa xác định được — chỉ có ở giai đoạn `probe`. */
+  unresolvedSlots?: number;
 };
 
 export type SolveResult = {

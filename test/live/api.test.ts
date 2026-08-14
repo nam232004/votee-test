@@ -77,6 +77,21 @@ test('giải được /random với seed bất kỳ', async () => {
   }
 });
 
+/**
+ * API chọn từ bí mật từ nguồn rộng hơn từ điển của solver: seed=38 ra "agnew" (danh từ riêng).
+ * Đây là ca từng làm solver bỏ tay, giờ phải giải được nhờ chuyển sang dò từng ô.
+ */
+test('giải được cả từ nằm ngoài từ điển (/random?seed=38 → "agnew")', async () => {
+  const result = await solve({ oracle: createRandomOracle(38), words, firstGuess });
+  assert.ok(result.solved, 'không giải được seed=38');
+  assert.equal(result.answer, 'agnew');
+  assert.ok(!words.includes('agnew'), 'test này chỉ có nghĩa khi "agnew" ngoài từ điển');
+  assert.ok(
+    result.history.some((step) => step.phase === 'probe'),
+    'đáng ra phải chuyển sang giai đoạn dò',
+  );
+});
+
 test('giải được /daily', async () => {
   // Không assert từ cụ thể: đáp án đổi mỗi ngày.
   const result = await solve({ oracle: createDailyOracle(), words, firstGuess });

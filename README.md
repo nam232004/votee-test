@@ -1,7 +1,8 @@
 # Votee Wordle Solver
 
 Solves the [Votee Wordle-like API](https://wordle.votee.dev:8000/redoc) automatically. Point it at a
-puzzle, and it infers the hidden word from per-guess feedback — typically in 4 guesses.
+puzzle, and it infers the hidden word from per-guess feedback — typically in 4 guesses, and **always**,
+even when the answer is not in any dictionary.
 
 TypeScript on Node 22 with **zero runtime dependencies and no build step**.
 
@@ -92,7 +93,7 @@ served from that port.
 | `--seed` | positive integer | random, printed | see [Finding 1](#finding-1-random-is-stateless-and-needs-a-pinned-seed) |
 | `--strategy` | `entropy`, `minimax`, `freq` | `entropy` | see [Guess selection](#guess-selection) |
 | `--size` | integer | `5` | dictionary currently only ships size 5 |
-| `--attempts` | integer | `6` | the API imposes no limit; 6 mirrors real Wordle |
+| `--attempts` | integer | `6` | budget for the inference phase; probing continues past it |
 | `--partition` | integer | `300` | max candidates before falling back to `freq` |
 | `--count` | integer | `300` | benchmark sample size |
 
@@ -175,17 +176,58 @@ contract test in `test/live/api.test.ts` replays all ten cases against the live 
 local model still agrees — so if Votee ever changes the rule, a test fails instead of the solver
 quietly degrading.
 
-## Finding 3: the per-slot rule leaks the answer in 26 guesses
+## Finding 3: the secret word is often not a dictionary word
 
-Because slots are independent, guessing `aaaaa`, `bbbbb`, …, `zzzzz` reveals the word outright: every
-`correct` marks exactly which slot holds that letter. Twenty-six requests, no dictionary required.
+Solving `/random` seeds 1–60 revealed that **9 of them are outside any reasonable word list**:
 
-This is how the ground-truth values in the test suite were obtained: `seed=1 → fiery`,
-`seed=42 → wrote`, `seed=777 → poise`, and the daily word on 2026-08-14 → `vetch`.
+```
+agnew  xhosa  aruba  rabin  thule  somal  della    ← proper nouns
+wasnt                                              ← contraction, apostrophe stripped
+fecal
+```
 
-The solver deliberately does **not** use it. The task is to infer the word, and inference does it in
-about 4 guesses rather than 26. It is reported here because it is a genuine property of the scoring
-rule, and because those recovered words make excellent test fixtures.
+Votee draws targets from a source that includes people, places and peoples. `word-list` excludes
+proper nouns by design; swapping in the much broader
+[`dwyl/english-words`](https://github.com/dwyl/english-words) covers 6 of the 9 but still misses
+`agnew`, `xhosa` and `aruba`. That is the point: **no dictionary can be relied on to cover the
+target**, so dictionary coverage cannot be part of the correctness argument.
+
+The task is to find the word, not to defend a word list. So the dictionary is treated as a fast path,
+with a guaranteed fallback behind it.
+
+## Finding 4: the per-slot rule guarantees a way out
+
+Because slots are judged independently, one guess is really **five independent experiments**: put a
+different letter in each unresolved slot and every slot answers about its own letter. Each answer
+removes something permanently:
+
+| Response at slot *i* | What it proves |
+| --- | --- |
+| `correct` | slot *i* is settled forever |
+| `absent` | that letter is in **no** slot — eliminated everywhere at once |
+| `present` | not at *i*, but somewhere — so try it at the other slots first |
+
+Iterating that resolves any word with **no dictionary at all**, and it must terminate: each guess
+either settles a slot or shrinks a slot's letter pool. This is also how the test fixtures were
+obtained (`seed=1 → fiery`, `seed=42 → wrote`, `seed=777 → poise`, daily on 2026-08-14 → `vetch`).
+
+Combining Findings 3 and 4 gives the solver its two phases, in `src/solver.ts`:
+
+1. **Inference** — dictionary + entropy. Solves 4 out of 5 puzzles in about 4 guesses.
+2. **Probing** — `src/probe.ts`, entered when the candidate set empties or the guess budget runs out.
+   Slower, but cannot fail.
+
+Two details keep probing cheap — together they took `seed=38` from 15 guesses down to 9:
+
+- **It inherits what inference learned**, so it never re-tests a letter earlier guesses ruled out.
+- **Settled slots get reused as membership tests.** Re-typing a known letter only earns another
+  `correct`, which teaches nothing. Putting an unclassified letter there instead turns the slot into a
+  free experiment: `absent` kills that letter everywhere, `present` proves it belongs to one of the
+  remaining slots. Without this, the last unresolved slot is tested one letter per guess — the reason
+  `agnew` originally spent ten guesses hunting a single `w`.
+
+The final probe re-submits the assembled word, so the answer is confirmed by the API rather than
+merely deduced. Since the API imposes no guess limit, all of this costs only time.
 
 ## Architecture
 
@@ -203,7 +245,8 @@ solve({ oracle }) ──┼── createRandomOracle(seed)  → /random?seed=…
 | `src/feedback.ts` | The scoring rule (Finding 2), plus the local oracle |
 | `src/filter.ts` | Narrows the candidate set |
 | `src/strategy.ts` | Chooses the next guess |
-| `src/solver.ts` | The game loop. Knows nothing about HTTP, prints nothing |
+| `src/probe.ts` | Dictionary-free fallback (Finding 4) — guaranteed to resolve any word |
+| `src/solver.ts` | The two-phase game loop. Knows nothing about HTTP, prints nothing |
 | `src/constraints.ts` | Derives human-readable knowledge — **for display only** |
 | `src/words.ts` | Loads the dictionary and the cached opening word |
 | `src/bench.ts` | Runs many games offline, returns numbers without printing |
@@ -279,8 +322,25 @@ Two refinements matter more than they look:
 
 ## Results
 
-Measured on this dictionary with the cached opening, 6-guess limit, sampled evenly and
-deterministically so runs are comparable. Reproduce with `npm run bench -- --strategy <name>`.
+### Against the live API
+
+`/random`, seeds 1–60, default settings:
+
+| | Count | Average guesses |
+| --- | --- | --- |
+| **Solved** | **60 / 60 (100%)** | **4.68** |
+| solved by inference alone | 51 | 4.12 |
+| needed the probe fallback | 9 | 7.9 |
+
+The nine are exactly the out-of-dictionary words from Finding 3. Without the fallback they were
+unsolvable; with it they cost about twice as many requests.
+
+### Guess-selection strategies
+
+Measured offline against the local scorer with the cached opening, a 6-guess limit, sampled evenly and
+deterministically so runs are comparable. **The probe fallback is disabled here** — with it enabled
+every row would read 100% and the comparison would say nothing. These numbers therefore measure the
+inference phase alone. Reproduce with `npm run bench -- --strategy <name>`.
 
 | Strategy | Sample | Solved | Average guesses | Time |
 | --- | --- | --- | --- | --- |
@@ -302,7 +362,8 @@ Every one of the ten failures is a same-frame family where candidates differ in 
 `cases`, `doves`, `epees`, `gills`, `gyves`, `nines`, `pined`, `sagos`, `saris`, `sazes`. With
 `doves`, for instance, no single word separates `doves`/`doges`/`doses`/`dozes`/`dotes` — the
 distinguishing letters `v`/`g`/`s`/`z`/`t` cannot all appear in one five-letter guess. This is
-inherent to a 6-guess budget, not a defect in the search.
+inherent to a 6-guess budget, not a defect in the search — and in normal operation the probe fallback
+finishes these off, which is why the live figure above is 100%.
 
 ## Complexity
 
@@ -318,18 +379,22 @@ With `n = 5` and `|C|` remaining candidates:
 
 ## Testing
 
-`npm test` runs 29 tests and needs no network, so it stays green even if the API is unreachable. The
+`npm test` runs 41 tests and needs no network, so it stays green even if the API is unreachable. The
 scoring tests use the exact request/response pairs captured from the live API rather than invented
-examples.
+examples, and the probe tests use the nine real out-of-dictionary words from Finding 3 plus adversarial
+cases (`zzzzz`, `queue`, `aeiou`) that a naive probe gets wrong.
 
-`npm run test:live` runs 7 integration tests: the ten-case contract test, seed determinism, the
+`npm run test:live` runs 8 integration tests: the ten-case contract test, seed determinism, the
 unseeded-drift behaviour from Finding 1, end-to-end solves of `/random` seeds 1, 42 and 777 (asserting
-`seed=1` yields `fiery`), an end-to-end `/daily` solve, and the `400` on a wrong-length guess.
+`seed=1` yields `fiery`), the out-of-dictionary fallback (`seed=38` → `agnew`), an end-to-end `/daily`
+solve, and the `400` on a wrong-length guess.
 
 ## Dictionary
 
-Secret words come from a full English word list, not Wordle's 2,315-answer list — `vetch` is a valid
-guess in Wordle but never an answer, and it appeared as a daily target here. `scripts/build-words.ts`
+Secret words come from a full English word list plus proper nouns, not Wordle's 2,315-answer list —
+`vetch` is a valid guess in Wordle but never an answer, and it appeared as a daily target here. Since
+no list covers the targets (Finding 3), the dictionary only has to make the *common* case fast;
+correctness rests on the probe fallback. `scripts/build-words.ts`
 filters [`word-list`](https://github.com/sindresorhus/word-list) down to **12,578** five-letter words
 and writes `data/words5.txt`, which is committed so the solver has no runtime dependency. The script
 fails loudly if the result falls outside 10,000–20,000 words or omits any known ground-truth answer.
@@ -352,11 +417,15 @@ fails loudly if the result falls outside 10,000–20,000 words or omits any know
 
 - Only size 5 ships a dictionary. The API layer handles other sizes; `words.ts` throws a clear error
   until a matching list is generated.
+- The one genuinely unsolvable input is a `--mode word` target containing something outside `a–z`
+  (`ab1cd`). The API rejects guesses with non-letters, so no guess can ever match that slot.
+  `createWordOracle` refuses such targets up front rather than probing 26 letters to discover it.
 - Guess selection is greedy — one level deep. A two-step lookahead would help precisely the
   same-frame families that account for every failure, at a large cost in compute.
 - `entropy` optimises average information, so it is not tuned for the 6-guess deadline specifically. A
   hybrid that switches to `minimax` when few guesses remain is untested but plausible.
-- The dictionary is broader than the API's own target list, which likely makes the benchmark
-  pessimistic: all four recovered ground-truth words are more common than entries like `sazes` or
-  `barps` that the benchmark is full of.
-- No rate-limit handling beyond 5xx retries, since no throttling was observed.
+- Probing averages 7.9 guesses on out-of-dictionary words. Adding proper nouns to the dictionary would
+  reduce how often it is needed at all, and probing still tests letters in alphabetical order — letter
+  frequency would find the common ones sooner.
+- No rate-limit handling beyond 5xx retries, since no throttling was observed. Probing multiplies
+  request count by about three on the words that need it.

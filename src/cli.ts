@@ -99,11 +99,24 @@ async function play(options: {
   const knowledge = createKnowledge(size);
   const started = Date.now();
 
+  let announcedProbe = false;
   const onProgress = (step: SolveStep): void => {
+    if (step.phase === 'probe' && !announcedProbe) {
+      announcedProbe = true;
+      console.log(
+        `${DIM}Từ bí mật không có trong từ điển. Chuyển sang dò từng ô — chậm hơn nhưng luôn tìm ra.${RESET}\n`,
+      );
+    }
+
     updateKnowledge(knowledge, step.guess, step.feedback);
     console.log(`#${step.attempt}  ${paint(step.guess, step.feedback)}  ${step.guess}`);
     console.log(`    ${DIM}${describe(knowledge)}${RESET}`);
-    console.log(`    ${DIM}candidates remaining: ${count(step.remaining)}${RESET}\n`);
+
+    const detail =
+      step.phase === 'probe'
+        ? `slots left to resolve: ${step.unresolvedSlots}`
+        : `candidates remaining: ${count(step.remaining)}`;
+    console.log(`    ${DIM}${detail}${RESET}\n`);
   };
 
   const result = await solve({ oracle, words, maxAttempts, strategy, maxPartitionCandidates, firstGuess, onProgress });
@@ -130,10 +143,13 @@ async function report(options: BenchOptions): Promise<number> {
     const n = distribution.get(attempts) ?? 0;
     console.log(`${attempts}  ${String(n).padStart(4)}  ${'#'.repeat(Math.round((n / targets) * 50))}`);
   }
-  if (failures.length > 0) console.log(`\nkhông giải được: ${failures.join(', ')}`);
+  if (failures.length > 0) {
+    console.log(`\nsuy luận không xong trong ${options.maxAttempts} lượt: ${failures.join(', ')}`);
+    console.log(`${DIM}Benchmark tắt fallback để đo riêng phần suy luận; chạy thật thì phần dò giải nốt các từ này.${RESET}`);
+  }
   console.log();
 
-  return failures.length === 0 ? 0 : 1;
+  return 0;
 }
 
 main()

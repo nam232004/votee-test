@@ -440,16 +440,23 @@ solve({ oracle, words, size, maxAttempts = 6, onProgress }) =>
 Vòng lặp:
 
 ```
+// GIAI ĐOẠN 1 — suy luận theo từ điển
 candidates = words
 for attempt in 1..maxAttempts:
     guess    = pickGuess(candidates)
     feedback = await oracle(guess)
-    onProgress({attempt, guess, feedback, ...})
+    onProgress({attempt, guess, feedback, phase: 'inference', ...})
     if feedback mọi ô đều 'correct' → solved, answer = guess, return
     candidates = filterCandidates(candidates, guess, feedback)
-    if candidates.length === 0 → throw DictionaryGapError(...)   // xem mục 8
-return { solved: false, ... }
+    if candidates.length === 0 → break   // từ bí mật ngoài từ điển, xem mục 8
+
+// GIAI ĐOẠN 2 — dò từng ô, không cần từ điển, bảo đảm ra kết quả
+answer = await resolveByProbing({ oracle, size, history })
+return { solved: true, answer, ... }
 ```
+
+`fallback: false` tắt giai đoạn 2 và cho throw `DictionaryGapError` như cũ — **chỉ** dùng khi
+benchmark, để đo riêng chất lượng phần suy luận. Mặc định là bật.
 
 Hai điều solver **không** được làm: không `console.log` (dùng `onProgress` callback — nhờ đó test
 im lặng, CLI đẹp), và không biết `seed`/endpoint nào (nhận `oracle` đã dựng sẵn).
@@ -590,7 +597,7 @@ engineering judgement.
 
 | Rủi ro | Mức độ | Xử lý |
 | --- | --- | --- |
-| **Từ bí mật không có trong từ điển của ta** ⇒ candidates rỗng | Cao | Throw `DictionaryGapError` với message rõ: "danh sách candidate rỗng sau lượt N — từ bí mật không có trong từ điển". **Tuyệt đối không im lặng, không fallback đoán bừa.** Thà fail rõ ràng và giải thích được khi live. Có thể thêm fallback tuỳ chọn: nới dần bằng cách chỉ giữ ràng buộc `correct` |
+| **Từ bí mật không có trong từ điển của ta** ⇒ candidates rỗng | **Chắc chắn xảy ra: 9/60 seed** | Chuyển sang `src/probe.ts` — dò từng ô, không cần từ điển, bảo đảm tìm ra. Xem mục 8.1 |
 | **Quên ghim `seed` ở mode random** | Cao | Solver không cho phép tạo random oracle mà thiếu seed (throw). CLI sinh + in seed |
 | Copy nguyên code từ `optimizing-wordle.md` | Cao | Code đó lỗi cú pháp + lỗi logic. Xem mục 5.4. Phải viết lại |
 | Implement duplicate-handling kiểu Wordle chuẩn | Cao | Sẽ **sai** so với API này. Xem mục 2 |
@@ -600,6 +607,29 @@ engineering judgement.
 | `size` khác 5 | Thấp | Hỗ trợ trong API layer; từ điển chỉ có size 5 ⇒ throw message rõ |
 | Đã giải xong ở lượt 1 | Thấp | Kiểm tra all-correct **trước** khi lọc |
 | Benchmark chậm | Thấp | Cap minimax ở ≤300 candidate; benchmark chạy offline nên nhanh |
+
+### 8.1 Sai lầm lớn nhất của bản plan này — và cách đã sửa
+
+Plan ban đầu viết *"tuyệt đối không fallback đoán bừa, thà fail rõ ràng"*. **Sai.** Nó lẫn lộn giữa
+mục tiêu và phương tiện: đề bài yêu cầu **tìm ra từ**, còn từ điển chỉ là cách làm cho việc đó nhanh.
+Fail rõ ràng vẫn là fail.
+
+Đo thật mới thấy đây không phải edge case: chạy `/random` seed 1–60 thì **9 seed nằm ngoài mọi từ
+điển hợp lý** — `agnew`, `xhosa`, `aruba`, `rabin`, `thule`, `somal`, `della` (danh từ riêng), `wasnt`
+(viết tắt bị bỏ dấu nháy), `fecal`. Đổi sang từ điển rộng hơn (`dwyl/english-words`) chỉ phủ được
+6/9 ⇒ **không từ điển nào cứu được**, nên độ phủ từ điển không thể là cơ sở của tính đúng đắn.
+
+Cách sửa dùng chính luật per-slot ở mục 2: vì mỗi ô được chấm độc lập, một lượt đoán là 5 phép thử
+song song, nên xác định được từng ô mà **không cần từ điển**, và bắt buộc phải kết thúc. Vậy:
+
+- Giai đoạn 1 — suy luận theo từ điển: nhanh, ~4 lượt, giải 51/60.
+- Giai đoạn 2 — `src/probe.ts`: chậm hơn (~7,9 lượt) nhưng không thể thất bại, lo 9/60 còn lại.
+
+Kết quả: **60/60, trung bình 4,68 lượt.** Trước khi sửa là 51/60.
+
+Hai bài học đáng nhắc khi live: (1) mục 3 của plan chọn tiêu chí từ điển mà không hề kiểm tra xem từ
+bí mật của API có nằm trong đó không — giả định chưa đo; (2) `DictionaryGapError` vẫn còn, nhưng giờ
+chỉ bật khi benchmark, vì nếu để fallback thì mọi strategy đều ra 100% và không so sánh được nữa.
 
 ---
 

@@ -38,7 +38,9 @@ export async function benchmark(options: BenchOptions): Promise<BenchReport> {
   const started = Date.now();
 
   for (const target of targets) {
-    const result = await solve({ oracle: createLocalOracle(target), words, ...solveOptions });
+    // Tắt fallback: benchmark đo riêng chất lượng phần suy luận theo từ điển. Bật lên thì
+    // tỉ lệ giải luôn là 100% và con số mất ý nghĩa so sánh.
+    const result = await solve({ oracle: createLocalOracle(target), words, fallback: false, ...solveOptions });
     if (result.solved) {
       totalAttempts += result.attempts;
       distribution.set(result.attempts, (distribution.get(result.attempts) ?? 0) + 1);
