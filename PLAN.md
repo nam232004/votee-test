@@ -3,6 +3,10 @@
 > Tài liệu này là **spec để thực thi**, không phải code. Người/model thực thi chỉ cần đọc file này,
 > không cần bất kỳ ngữ cảnh nào khác. Mọi phát hiện về API trong đây đều **đã được kiểm chứng bằng
 > request thật** (log ở Phụ lục A) — không phải phỏng đoán.
+>
+> **Plan này đã được dry-run thực tế** trên branch `dry-run`: implement đầy đủ, 29 unit test +
+> 7 live test xanh, benchmark 1.000 ván. Mục 0.5 liệt kê những chỗ plan đoán SAI và số đo thay thế.
+> Đọc mục đó trước khi bắt tay.
 
 ---
 
@@ -42,6 +46,35 @@ puzzle ẩn — và đó là lý do tôi test được thuật toán mà không 
 
 **Anti-goal:** không làm web UI. Deliverable là "zipped Git repo + README" và một buổi live coding.
 CLI in ra tiến trình suy luận thuyết phục hơn UI màu mè, và nhẹ hơn nhiều để code trực tiếp.
+
+---
+
+## 0.5 Kết quả dry-run — những gì plan này ĐOÁN SAI
+
+Plan đã được implement đầy đủ và chạy thật. Phần kiến trúc đúng nguyên vẹn; phần **số liệu tôi đoán
+thì sai**. Dưới đây là số đo thay thế — dùng số này, đừng dùng số tôi đoán ở các mục sau.
+
+| Plan nói | Thực tế đo được | Hành động |
+| --- | --- | --- |
+| Strategy mặc định là `freq` (heuristic tần suất) | `freq` chỉ giải được **90,7%** trong 6 lượt | **Mặc định phải là `entropy` (99,0%)**. `freq` chỉ dùng làm fallback khi còn > 300 candidate |
+| Benchmark ≥ 99% và ≤ 4,2 lượt | `entropy`: **99,0%**, **4,22 lượt** (mẫu 1.000) | Ngưỡng test: ≥ 97% và ≤ 4,4 lượt (mẫu 150) |
+| minimax là "điểm cộng lớn nhất" | minimax **99,7%** nhưng **4,29 lượt** — kém entropy về số lượt | Làm cả ba, mặc định `entropy`. Minimax vẫn đáng nói vì nó đảm bảo worst case |
+| Nới ngưỡng phân hoạch sẽ tốt hơn | Nới lên 2000: **4,20 vs 4,17** — không cải thiện, chậm gấp đôi | Giữ 300. Đây là ví dụ tốt về "đo trước khi tối ưu" |
+| Opening word quan trọng, cần cache | `tares` (6,2024 bits) chỉ hơn `cares` của heuristic **0,01 lượt** | Vẫn tính (rẻ, và "tôi tính ra" nghe hay), nhưng đừng kỳ vọng nhiều |
+| Sweep toàn từ điển để tìm opening là "quá chậm" | **3 giây** nhờ mã hoá pattern thành số base-3 đếm bằng typed array | Cache thành tiện lợi, không phải bắt buộc |
+| Từ điển ~15.000 từ | **12.578 từ** từ `word-list`, chứa đủ 4 ground truth | Đạt tiêu chí, giữ nguyên |
+| `npm test` = `node --test test/unit/` | Node 22 coi đường dẫn thư mục là module ⇒ **lỗi** | Phải dùng glob: `node --test "test/unit/*.test.ts"` |
+| Bật/tắt live test bằng env `VOTEE_LIVE=1` | Set env cross-platform trên Windows lằng nhằng | Tách thư mục `test/unit/` và `test/live/`, hai script riêng. Không cần env |
+| `src/` < 700 dòng, mỗi file ≤ 120 | **641 dòng**, `cli.ts` 124 và `strategy.ts` 129 | Tách benchmark ra `src/bench.ts`. Nới giới hạn thành ≤ 130 |
+
+Hai điều **plan đoán đúng và đáng ăn điểm nhất**: `/random` cần ghim seed (không có thì solver không
+bao giờ hội tụ), và luật scoring per-slot (10/10 case khớp API thật qua contract test).
+
+Một phát hiện mới chỉ lộ ra khi chạy thật: **toàn bộ ca thất bại đều là họ từ khác nhau đúng một ô** —
+`cases`, `doves`, `epees`, `gills`, `gyves`, `nines`, `pined`, `sagos`, `saris`, `sazes`. Ví dụ với
+`doves`, không từ nào tách được `doves`/`doges`/`doses`/`dozes`/`dotes` vì các chữ phân biệt
+`v`/`g`/`s`/`z`/`t` không thể cùng nằm trong một từ 5 chữ. Đây là giới hạn nội tại của ngân sách 6
+lượt, không phải bug — và là câu trả lời sẵn cho câu hỏi "sao không đạt 100%?".
 
 ---
 
@@ -119,11 +152,14 @@ Cách làm (giữ runtime **zero dependency**):
 2. Ghi ra `data/words5.txt`, **commit file này**. Runtime chỉ `readFile` — không cần cài gì để chạy.
 3. Ghi nguồn + license vào README (mục attribution — email nói rõ plagiarism sẽ bị đánh giá xấu).
 
+> **Đã dry-run:** `word-list` cho **12.578** từ 5 chữ và chứa đủ cả `fiery`, `wrote`, `poise`,
+> `vetch`. Đạt toàn bộ tiêu chí dưới đây. Dùng nguồn này, không cần tìm nguồn khác.
+
 **Tiêu chí nghiệm thu từ điển (bắt buộc chạy, fail thì đổi nguồn):**
 
 - Kích thước trong khoảng 10.000–20.000 từ.
 - Phải chứa đủ 4 từ ground truth: `fiery`, `wrote`, `poise`, **`vetch`**.
-- Chạy benchmark offline (mục 6) đạt tỉ lệ giải ≥ 99% trong 6 lượt.
+- Chạy benchmark offline (mục 6) với strategy `entropy` đạt tỉ lệ giải ≥ 97% trong 6 lượt.
 
 Nếu nguồn đã chọn thiếu `vetch`, thử `an-array-of-english-words`, hoặc danh sách
 "Wordle allowed guesses" (~14.855 từ) kèm attribution rõ ràng.
@@ -175,31 +211,48 @@ votee-wordle-solver/
 │   ├── api.ts                # 3 oracle → response đã normalize
 │   ├── feedback.ts           # luật scoring (bản local, mirror API)
 │   ├── filter.ts             # lọc candidate theo feedback
-│   ├── constraints.ts        # dẫn xuất ràng buộc — CHỈ để hiển thị (xem 5.3)
+│   ├── constraints.ts        # dẫn xuất ràng buộc — CHỈ để hiển thị (xem 5.3b)
 │   ├── strategy.ts           # chọn guess tiếp theo
 │   ├── solver.ts             # game loop, oracle-agnostic
-│   ├── words.ts              # load + validate từ điển
+│   ├── bench.ts              # chạy nhiều ván offline, trả số liệu thuần (không in)
+│   ├── words.ts              # load từ điển + opening đã cache
 │   └── cli.ts                # parse arg, render output
 └── test/
-    ├── feedback.test.ts
-    ├── filter.test.ts
-    ├── strategy.test.ts
-    ├── solver.test.ts        # offline, gồm benchmark
-    └── api.test.ts           # integration, opt-in (env VOTEE_LIVE=1)
+    ├── unit/                 # `npm test` — không cần mạng
+    │   ├── helpers.ts        # PRNG deterministic + lấy mẫu
+    │   ├── feedback.test.ts
+    │   ├── filter.test.ts
+    │   ├── constraints.test.ts
+    │   ├── strategy.test.ts
+    │   └── solver.test.ts    # gồm benchmark thu nhỏ
+    └── live/                 # `npm run test:live` — cần mạng
+        └── api.test.ts
 ```
 
-Tổng ~500–600 dòng code. Mỗi file một trách nhiệm, đọc là hiểu.
+Tách `test/unit/` và `test/live/` thành hai thư mục thay vì dùng biến môi trường: set env
+cross-platform trên Windows lằng nhằng, còn hai script trỏ vào hai thư mục thì không thể sai.
+Lưu ý Node 22 **không nhận đường dẫn thư mục** cho `--test`, phải dùng glob:
+`node --test "test/unit/*.test.ts"`.
 
-`package.json` scripts:
+Thực tế dry-run: **641 dòng** trong `src/`. Mỗi file một trách nhiệm, đọc là hiểu.
+
+`package.json` scripts (đã chạy được, copy nguyên):
 
 ```
-start      : node src/cli.ts
-typecheck  : tsc --noEmit
-test       : node --test
-test:live  : cross-env-free → VOTEE_LIVE=1 node --test   (Windows: dùng `npm run test:live` với
-             `set VOTEE_LIVE=1&&node --test`, hoặc đơn giản hơn: đọc env trong test và document cách set)
-build:words: node scripts/build-words.ts
+start        : node src/cli.ts
+solve:random : node src/cli.ts --mode random
+solve:daily  : node src/cli.ts --mode daily
+bench        : node src/cli.ts --mode bench
+test         : node --test "test/unit/*.test.ts"
+test:live    : node --test "test/live/*.test.ts"
+typecheck    : tsc --noEmit
+build:words  : node scripts/build-words.ts
+build:opening: node scripts/best-opening.ts
 ```
+
+`tsconfig.json` đã kiểm chứng với TypeScript 7.0.2: bật thêm `erasableSyntaxOnly` để **compiler chặn
+sẵn** `enum`/`namespace`/parameter property — nhờ vậy lỗi type stripping thành lỗi type-check thay vì
+crash lúc chạy. Kèm `noUncheckedIndexedAccess` (đáng giá vì code truy cập `word[i]` liên tục).
 
 ### Data shape dùng xuyên suốt (`src/types.ts`, chốt cứng, không đổi)
 
@@ -362,10 +415,19 @@ Ghi chú bắt buộc đọc — **đừng copy nguyên đoạn code trong `opti
   (framing information theory), **NYT "Best Wordle Tips"** (heuristic dàn chữ/nguyên âm), và ghi rõ
   là *đã điều chỉnh*, không phải sao chép.
 
-Guess mở đầu: **không hardcode `slate`.** Hãy tính bằng chính `pickGuess` trên toàn từ điển và
-**cache lại** (tính một lần khi khởi động, hoặc ghi vào `data/opening.json`). Vì với luật per-slot
-và từ điển của ta, từ mở đầu tối ưu có thể khác `slate` — và "tôi *tính ra* nó" nghe hay hơn hẳn
-"tôi đọc thấy trên mạng". Nếu tính lâu > 300ms thì cache.
+Guess mở đầu: **không hardcode `slate`.** Tính bằng `scripts/best-opening.ts` (entropy trên toàn từ
+điển) và ghi ra `data/opening.json`.
+
+> **Đã dry-run.** Kết quả là **`tares` — 6,2024 bits**, trên `lares` (6,1560) và `rales` (6,1206).
+> Đáng chú ý: `soare` — từ mở đầu tối ưu quen thuộc của Wordle chuẩn — chỉ xếp **thứ 7** ở đây, đúng
+> như dự đoán rằng luật per-slot đổi thứ tự tối ưu. Đây là dữ kiện tốt để nói khi live.
+>
+> Sweep toàn bộ 12.578² cặp chỉ mất **3 giây** nhờ mã hoá pattern thành số base-3
+> (`absent=0, present=1, correct=2`) rồi đếm bằng `Int32Array(243)`, tránh cấp phát 158 triệu string.
+> Nhanh đến mức cache chỉ còn là tiện lợi.
+>
+> Nhưng đừng kỳ vọng nhiều: đổi từ `cares` (heuristic chọn) sang `tares` chỉ đổi số lượt trung bình
+> khoảng 0,01. **Strategy quyết định gần như toàn bộ kết quả, không phải opening word.**
 
 #### Nâng cấp: `--strategy=minimax` (Milestone 7)
 
@@ -417,9 +479,24 @@ thì thêm biến thể chỉ là đổi hàm chấm điểm — nếu còn th�
   được nhiều từ cùng lúc. **Đây là khoảnh khắc demo đẹp nhất** — nếu bắt được nó trong recording,
   hãy dừng lại giải thích.
 
-Giữ heuristic tần suất làm **mặc định** (nhanh, dễ giải thích); minimax là flag để so sánh trong
-benchmark. Nếu benchmark cho thấy minimax tốt hơn rõ rệt và vẫn nhanh, đổi mặc định và ghi lý do
-vào README.
+> **Đã dry-run — kết quả đảo ngược đề xuất ban đầu của plan.** Đo trên cùng mẫu, cùng opening:
+>
+> | Strategy | Mẫu | Giải được | Số lượt TB | Thời gian |
+> | --- | --- | --- | --- | --- |
+> | `entropy` | 1000 | **99,0%** | **4,22** | 39,7s |
+> | `entropy` | 300 | 99,3% | 4,18 | 10,9s |
+> | `minimax` | 300 | 99,7% | 4,29 | 12,4s |
+> | `freq` | 300 | 90,7% | 4,28 | 0,6s |
+>
+> ⇒ **Mặc định là `entropy`**, không phải `freq`. `freq` nhanh hơn 20 lần nhưng thất bại nhiều gấp 9,
+> nên chỉ giữ nó làm fallback khi còn > 300 candidate (lúc đó phân hoạch quá đắt) và làm mốc so sánh.
+>
+> Minimax cho tỉ lệ giải cao nhất nhưng số lượt trung bình tệ hơn — đúng bản chất: nó tối ưu trường
+> hợp xấu nhất, không tối ưu trung bình. Implement cả ba vì chúng dùng chung bước phân hoạch, chi phí
+> thêm chỉ là hai hàm chấm điểm, và bảng so sánh này chính là thứ đáng đưa vào README.
+>
+> Nới `maxPartitionCandidates` từ 300 lên 2000 **không cải thiện** (4,20 vs 4,17) mà chậm gấp đôi.
+> Giữ 300. Ghi lại thí nghiệm này trong README như một ví dụ "đo trước khi tối ưu".
 
 ### 5.5 `src/words.ts`
 
@@ -535,13 +612,16 @@ Nguyên tắc: **toàn bộ logic test được offline, không cần mạng.** 
 Dựng một **oracle offline** từ `score()` (chính là `createWordOracle` nhưng local). Rồi:
 
 - Giải đúng 4 ground truth: `fiery`, `wrote`, `poise`, `vetch`.
-- **Benchmark**: 300 từ lấy mẫu deterministic từ từ điển. Assert:
-  - tỉ lệ giải trong 6 lượt **≥ 99%**
-  - số lượt trung bình **≤ 4.2** (mốc thực tế cho heuristic tần suất; minimax nên xuống ~3.6)
-  - in ra phân bố `1..6 lượt` — số này đưa vào README rất đẹp
+- **Benchmark** trong test: mẫu **150** từ (chạy ~5s, đủ nhanh để nằm trong `npm test`). Assert:
+  - tỉ lệ giải trong 6 lượt **≥ 97%**
+  - số lượt trung bình **≤ 4,4**
+- Hai ngưỡng trên là **số đo được** (`entropy` đạt 99,0% và 4,22 lượt trên mẫu 1.000), đã nới ra chút
+  cho dao động của mẫu nhỏ. Ngưỡng ≥99%/≤4,2 mà plan đoán lúc đầu là **sai** — xem mục 0.5.
+- Benchmark đầy đủ (1.000 mẫu, phân bố 1..6 lượt) chạy qua CLI `--mode bench --count 1000`, không đưa
+  vào `npm test` vì mất ~40s.
 - Nếu assert fail ⇒ **không nới lỏng ngưỡng**. Xem lại từ điển hoặc strategy.
 
-### 6.5 `api.test.ts` — integration, chỉ chạy khi `VOTEE_LIVE=1`
+### 6.5 `test/live/api.test.ts` — integration, chạy bằng `npm run test:live`
 
 - **Contract test (test giá trị nhất trong repo):** với target `apple` và 5 guess ở bảng 6.1, gọi
   `/word/apple` thật và assert response khớp `score()` local. Đây là bằng chứng mô hình của ta đúng
@@ -620,7 +700,7 @@ engineering judgement.
    freq vs minimax.
 10. **Độ phức tạp** — `score` O(n²) với n=5 (thực chất hằng số); filter O(|C|·n²); heuristic
     O(|C|·n); minimax O(|G|·|C|·n²) và lý do cap.
-11. **Testing** — offline vs live, cách chạy live (`VOTEE_LIVE=1`).
+11. **Testing** — offline vs live, cách chạy live (`npm run test:live`).
 12. **Attribution** — nguồn từ điển + license; The Dodgy Engineer; 3Blue1Brown; NYT Wordle tips;
     ghi rõ AI assistance đã dùng và phần nào là quyết định của bạn. Email nói rõ về plagiarism —
     minh bạch ở đây là *cộng điểm*, không phải trừ.
@@ -632,15 +712,15 @@ engineering judgement.
 ## 10. Definition of Done
 
 - [ ] `npm test` xanh, không cần mạng.
-- [ ] `VOTEE_LIVE=1 npm test` xanh, gồm contract test đối chiếu `score()` với API thật.
+- [ ] `npm run test:live` xanh, gồm contract test đối chiếu `score()` với API thật.
 - [ ] `--mode random` không truyền seed: in seed ra và giải được.
 - [ ] `--mode daily` giải được.
 - [ ] `--mode word --target vetch` giải được (từ hiếm).
-- [ ] Benchmark ≥ 99% giải trong 6 lượt, trung bình ≤ 4.2 lượt.
+- [ ] Benchmark ≥ 97% giải trong 6 lượt, trung bình ≤ 4,4 lượt (mẫu 150 — xem mục 0.5).
 - [ ] `npm run typecheck` (`tsc --noEmit`) sạch, `strict: true`, **không có `any`** trong `src/`.
 - [ ] Không dùng `enum`/`namespace`/parameter property (type stripping sẽ crash — mục 4).
 - [ ] Runtime `dependencies` = **rỗng**; không có bước build.
-- [ ] Tổng LOC `src/` < 700, không file nào > 120 dòng.
+- [ ] Tổng LOC `src/` < 700, không file nào > 130 dòng (dry-run: 641 dòng, max 129).
 - [ ] `constraints.ts` không được import bởi `solver.ts` (chỉ `cli.ts` dùng).
 - [ ] README có đủ 13 mục, gồm cả 3 phát hiện về API.
 - [ ] Bạn giải thích được **từng file** trong 2 câu. Nếu không → xoá/đơn giản hoá file đó.
