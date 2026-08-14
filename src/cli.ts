@@ -112,10 +112,15 @@ async function play(options: {
     console.log(`#${step.attempt}  ${paint(step.guess, step.feedback)}  ${step.guess}`);
     console.log(`    ${DIM}${describe(knowledge)}${RESET}`);
 
+    const solved = step.feedback.every((mark) => mark === 'correct');
     const detail =
-      step.phase === 'probe'
-        ? `slots left to resolve: ${step.unresolvedSlots}`
-        : `candidates remaining: ${count(step.remaining)}`;
+      step.phase !== 'probe'
+        ? `candidates remaining: ${count(step.remaining)}`
+        : solved
+          ? 'API confirmed all 5 slots'
+          : step.unresolvedSlots === 0
+            ? 'all 5 slots resolved — next guess submits the assembled word'
+            : `slots left to resolve: ${step.unresolvedSlots}`;
     console.log(`    ${DIM}${detail}${RESET}\n`);
   };
 

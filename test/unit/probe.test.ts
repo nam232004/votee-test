@@ -83,3 +83,28 @@ test('tắt fallback thì báo lỗi rõ ràng thay vì dò', async () => {
     DictionaryGapError,
   );
 });
+
+test('chữ present khi chỉ còn một ô trống thì chốt, không đoán thêm hàng rác', async () => {
+  const target = 'votee';
+  const oracle = createLocalOracle(target);
+  const history = [];
+  for (const guess of ['tares', 'botel', 'daman']) {
+    history.push({
+      attempt: history.length + 1,
+      guess,
+      feedback: await oracle(guess),
+      remaining: 0,
+      phase: 'inference' as const,
+    });
+  }
+
+  const { answer, steps } = await resolveByProbing({ oracle, size: 5, history });
+  assert.equal(answer, target);
+
+  const extras = steps.filter((step) => step.guess !== target).map((step) => step.guess);
+  assert.ok(
+    extras.every((guess) => !/[xyz]/.test(guess)),
+    `sau khi biết v có trong từ, không được đoán thêm ${extras.join(', ')}`,
+  );
+  assert.equal(steps.at(-1)?.guess, target);
+});

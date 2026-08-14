@@ -184,10 +184,15 @@
         feedback.map((mark, i) => `<div class="tile ${mark}">${guess[i]}</div>`).join('');
 
       function renderStep(step) {
+        const solved = step.feedback.every((mark) => mark === 'correct');
         const detail =
-          step.phase === 'probe'
-            ? `còn ${step.unresolvedSlots} ô chưa xác định`
-            : `còn ${step.remaining.toLocaleString('en-US')} từ khả thi`;
+          step.phase !== 'probe'
+            ? `còn ${step.remaining.toLocaleString('en-US')} từ khả thi`
+            : solved
+              ? 'API xác nhận đủ 5 ô'
+              : step.unresolvedSlots === 0
+                ? 'đã chốt đủ 5 ô — lượt sau gửi nguyên từ'
+                : `còn ${step.unresolvedSlots} ô chưa chốt`;
 
         const node = document.createElement('div');
         node.className = 'step';

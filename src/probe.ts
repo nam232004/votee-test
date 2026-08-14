@@ -48,6 +48,31 @@ function apply(slots: Slots, guess: string, feedback: Feedback): void {
         break;
     }
   }
+  deduce(slots);
+}
+
+/**
+ * Chữ đã biết là có trong từ (`floating`) mà chỉ còn đúng một ô hợp lệ thì chốt luôn.
+ *
+ * Không làm bước này thì solver biết `v` nằm trong `votee` sau lượt `oquvw` nhưng vẫn
+ * đoán thêm `vxyze` — lãng phí, vì bốn ô kia đã là `otee` nên `v` chỉ có thể ở ô còn lại.
+ */
+function deduce(slots: Slots): void {
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const letter of [...slots.floating]) {
+      const homes: number[] = [];
+      for (let i = 0; i < slots.fixed.length; i++) {
+        if (slots.fixed[i] === null && !slots.bannedAt[i]!.has(letter)) homes.push(i);
+      }
+      if (homes.length === 1) {
+        slots.fixed[homes[0]!] = letter;
+        slots.floating.delete(letter);
+        changed = true;
+      }
+    }
+  }
 }
 
 /**
