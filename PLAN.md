@@ -1,774 +1,459 @@
 ﻿# PLAN — Votee Wordle Solver (TypeScript, zero build step, zero runtime deps)
 
-> Tài liệu này là **spec để thực thi**, không phải code. Người/model thực thi chỉ cần đọc file này,
-> không cần bất kỳ ngữ cảnh nào khác. Mọi phát hiện về API trong đây đều **đã được kiểm chứng bằng
-> request thật** (log ở Phụ lục A) — không phải phỏng đoán.
+> This is an **execution spec**, not code. Every API claim here was **verified with live
+> requests** (Appendix A) — not guessed.
 >
-> **Plan này đã được dry-run thực tế** trên branch `dry-run`: implement đầy đủ, 29 unit test +
-> 7 live test xanh, benchmark 1.000 ván. Mục 0.5 liệt kê những chỗ plan đoán SAI và số đo thay thế.
-> Đọc mục đó trước khi bắt tay.
+> The plan was dry-run on branch `dry-run`: full implementation, unit + live tests green,
+> 1,000-game bench. Section 0.5 lists where the first draft was wrong and the numbers to use
+> instead. Read that first.
 
 ---
 
-## 0. Trả lời câu hỏi thiết kế: 3 API = 3 option hay 1 thuật toán?
+## 0. Design question: 3 APIs = 3 features, or one algorithm?
 
-**Kết luận: 3 endpoint KHÔNG phải 3 tính năng. Chúng là 3 nguồn cấp cùng một thứ — một `oracle`.**
+**Conclusion: the three endpoints are not three features. They are three sources of the same thing — an `oracle`.**
 
-Cả ba endpoint có **chung một signature và chung một kiểu response**:
+All three share one signature and one response shape:
 
 ```
 (guess, size) -> GuessResult[]      // GuessResult = { slot, guess, result: absent|present|correct }
 ```
 
-Khác biệt duy nhất là *ai giữ từ bí mật*:
+The only difference is *who holds the secret*:
 
-| Endpoint | Ai giữ từ bí mật | Vai trò đúng trong bài này |
+| Endpoint | Who holds the secret | Role in this task |
 | --- | --- | --- |
-| `GET /word/{word}` | **Ta tự chỉ định** | Test oracle. Biết đáp án ⇒ dùng để verify solver, không phải để "chơi" |
-| `GET /random` | Server, ẩn | **Đây chính là đề bài** ("automatically guesses random words") |
-| `GET /daily` | Server, ẩn, cố định theo ngày | Một puzzle thật thứ hai để demo |
+| `GET /word/{word}` | **We pick it** | Test oracle. Known answer ⇒ verify the solver, not "play" |
+| `GET /random` | Server, hidden | **This is the brief** ("automatically guesses random words") |
+| `GET /daily` | Server, hidden, fixed per day | A second real puzzle for demo |
 
-Vì vậy bản chạy trước (UI + 3 select, mỗi API = 1 option) là **hiểu sai đề**. Nó biến bài thành
-"trình duyệt API" trong khi email yêu cầu: *"write a program that **automatically** guesses random
-words"*. Chấm điểm sẽ nhìn vào **thuật toán suy luận**, không nhìn vào việc bạn gọi được 3 URL.
+A UI with three dropdowns, one per endpoint, **misreads the brief**. The email asks for a program that **automatically** guesses random words. Graders look at **inference**, not at whether you can hit three URLs.
 
-Kiến trúc đúng là **một solver duy nhất + một interface oracle có 3 implementation**:
+Correct architecture: **one solver + one oracle interface with three implementations**:
 
 ```
-                    ┌── wordOracle(target)   → /word/{target}   (dùng cho test)
-solver(oracle) ─────┼── randomOracle(seed)   → /random?seed=…   (bài chính)
+                    ┌── wordOracle(target)   → /word/{target}   (tests)
+solver(oracle) ─────┼── randomOracle(seed)   → /random?seed=…   (the actual task)
                     └── dailyOracle()        → /daily
 ```
 
-Solver **không biết** nó đang nói chuyện với endpoint nào. Đó là điểm bán hàng khi live: bạn nói được
-câu *"tôi đã tách oracle ra khỏi solver, nên cùng một thuật toán chạy được cho cả test có đáp án lẫn
-puzzle ẩn — và đó là lý do tôi test được thuật toán mà không cần đoán mò"*.
+The solver **does not know** which endpoint it is talking to. That is the live-coding pitch: the same algorithm runs against a known-answer test *and* a hidden puzzle.
 
-**Anti-goal:** không làm web UI. Deliverable là "zipped Git repo + README" và một buổi live coding.
-CLI in ra tiến trình suy luận thuyết phục hơn UI màu mè, và nhẹ hơn nhiều để code trực tiếp.
+**Product of the 2-hour recording:** solver + CLI (and tests). A thin English page that calls the **same** `solve()` is welcome if time remains — it is not a second algorithm, and it is not three features.
 
 ---
 
-## 0.5 Kết quả dry-run — những gì plan này ĐOÁN SAI
+## 0.5 Dry-run results — what this plan got wrong
 
-Plan đã được implement đầy đủ và chạy thật. Phần kiến trúc đúng nguyên vẹn; phần **số liệu tôi đoán
-thì sai**. Dưới đây là số đo thay thế — dùng số này, đừng dùng số tôi đoán ở các mục sau.
+Architecture held. **The guessed numbers did not.** Use the measured column, not the original guesses later in the file.
 
-| Plan nói | Thực tế đo được | Hành động |
+| Plan said | Measured | Action |
 | --- | --- | --- |
-| Strategy mặc định là `freq` (heuristic tần suất) | `freq` chỉ giải được **90,7%** trong 6 lượt | **Mặc định phải là `entropy` (99,0%)**. `freq` chỉ dùng làm fallback khi còn > 300 candidate |
-| Benchmark ≥ 99% và ≤ 4,2 lượt | `entropy`: **99,0%**, **4,22 lượt** (mẫu 1.000) | Ngưỡng test: ≥ 97% và ≤ 4,4 lượt (mẫu 150) |
-| minimax là "điểm cộng lớn nhất" | minimax **99,7%** nhưng **4,29 lượt** — kém entropy về số lượt | Làm cả ba, mặc định `entropy`. Minimax vẫn đáng nói vì nó đảm bảo worst case |
-| Nới ngưỡng phân hoạch sẽ tốt hơn | Nới lên 2000: **4,20 vs 4,17** — không cải thiện, chậm gấp đôi | Giữ 300. Đây là ví dụ tốt về "đo trước khi tối ưu" |
-| Opening word quan trọng, cần cache | `tares` (6,2024 bits) chỉ hơn `cares` của heuristic **0,01 lượt** | Vẫn tính (rẻ, và "tôi tính ra" nghe hay), nhưng đừng kỳ vọng nhiều |
-| Sweep toàn từ điển để tìm opening là "quá chậm" | **3 giây** nhờ mã hoá pattern thành số base-3 đếm bằng typed array | Cache thành tiện lợi, không phải bắt buộc |
-| Từ điển ~15.000 từ | **12.578 từ** từ `word-list`, chứa đủ 4 ground truth | Đạt tiêu chí, giữ nguyên |
-| `npm test` = `node --test test/unit/` | Node 22 coi đường dẫn thư mục là module ⇒ **lỗi** | Phải dùng glob: `node --test "test/unit/*.test.ts"` |
-| Bật/tắt live test bằng env `VOTEE_LIVE=1` | Set env cross-platform trên Windows lằng nhằng | Tách thư mục `test/unit/` và `test/live/`, hai script riêng. Không cần env |
-| `src/` < 700 dòng, mỗi file ≤ 120 | **641 dòng**, `cli.ts` 124 và `strategy.ts` 129 | Tách benchmark ra `src/bench.ts`. Nới giới hạn thành ≤ 130 |
+| Default strategy `freq` | `freq` solves **90.7%** in 6 guesses | **Default `entropy` (99.0%)**. `freq` only when > 300 candidates |
+| Bench ≥ 99% and ≤ 4.2 guesses | `entropy`: **99.0%**, **4.22** guesses (n=1,000) | Test bar: ≥ 97% and ≤ 4.4 (n=150) |
+| Minimax is the biggest bonus | minimax **99.7%** but **4.29** guesses — worse average than entropy | Ship all three; default `entropy`. Minimax is still worth talking about (worst case) |
+| Raising the partition cap helps | Cap 2,000: **4.20 vs 4.17** — no win, 2× slower | Keep 300. Good "measure before you optimise" story |
+| Opening word matters, must cache | `tares` (6.2024 bits) beats heuristic `cares` by **0.01** guesses | Still compute it (cheap, and "I computed this" lands well); don't expect a miracle |
+| Full-dictionary opening sweep is "too slow" | **3 seconds** with base-3 pattern codes + typed arrays | Cache is convenience, not a requirement |
+| Dictionary ~15,000 words | **12,578** from `word-list`, contains all 4 ground-truth words | Keep this source |
+| `npm test` = `node --test test/unit/` | Node 22 treats a directory path as a module ⇒ **error** | Glob: `node --test "test/unit/*.test.ts"` |
+| Gate live tests with `VOTEE_LIVE=1` | Setting env cross-platform on Windows is messy | Split `test/unit/` and `test/live/`, two scripts. No env var |
+| `src/` < 700 lines, each file ≤ 120 | **641** lines; `cli.ts` 124, `strategy.ts` 129 | Split bench into `src/bench.ts`. Limit ≤ 130 |
+| Empty candidates → throw and stop | API secrets include proper nouns (`agnew`, `votee`) | Default `fallback=true` → `resolveByProbing` (`src/probe.ts`). Throw `DictionaryGapError` only when fallback is off (bench) |
+| No web UI | A thin page over the same solver is useful to show three oracles | Optional slice 5. Same `solve()`. English copy. Hide unused fields |
 
-Hai điều **plan đoán đúng và đáng ăn điểm nhất**: `/random` cần ghim seed (không có thì solver không
-bao giờ hội tụ), và luật scoring per-slot (10/10 case khớp API thật qua contract test).
+Two things the plan **got right**, and they are the highest-value findings: `/random` needs a pinned seed (otherwise the solver never converges), and scoring is per-slot (10/10 contract cases match the live API).
 
-Một phát hiện mới chỉ lộ ra khi chạy thật: **toàn bộ ca thất bại đều là họ từ khác nhau đúng một ô** —
-`cases`, `doves`, `epees`, `gills`, `gyves`, `nines`, `pined`, `sagos`, `saris`, `sazes`. Ví dụ với
-`doves`, không từ nào tách được `doves`/`doges`/`doses`/`dozes`/`dotes` vì các chữ phân biệt
-`v`/`g`/`s`/`z`/`t` không thể cùng nằm trong một từ 5 chữ. Đây là giới hạn nội tại của ngân sách 6
-lượt, không phải bug — và là câu trả lời sẵn cho câu hỏi "sao không đạt 100%?".
+A finding that only showed up in the bench: **every inference miss is a family that differs by one slot** — `cases`, `doves`, `epees`, `gills`, `gyves`, `nines`, `pined`, `sagos`, `saris`, `sazes`. For `doves`, no guess splits `doves`/`doges`/`doses`/`dozes`/`dotes` because the distinguishing letters cannot all sit in one 5-letter word. That is a 6-guess budget limit, not a bug — and a ready answer to "why not 100%?". With probe on, those words still finish; the bench turns fallback off to measure inference alone.
 
 ---
 
-## 1. Phát hiện quan trọng nhất — `/random` là STATELESS và KHÔNG deterministic nếu thiếu `seed`
+## 1. Highest-value finding — `/random` is STATELESS and not deterministic without `seed`
 
-Đây là cái bẫy của bài. Cả 3 endpoint đều **không có session, không có state**. Mỗi request là độc lập.
-Với `/random`, **không truyền `seed` thì mỗi request là một từ bí mật KHÁC NHAU**:
+This is the trap. None of the three endpoints has a session. Each request is independent. On `/random`, **omitting `seed` means every request is a different secret**:
 
 ```
 GET /random?guess=arise&size=5   → a=present r=present i=absent s=absent e=absent
-GET /random?guess=arise&size=5   → a=absent   r=correct i=absent s=absent e=absent   ← khác từ!
+GET /random?guess=arise&size=5   → a=absent   r=correct i=absent s=absent e=absent   ← different word
 ```
 
-⇒ **Không thể giải `/random` nếu không ghim `seed`.** Có `seed` thì hoàn toàn deterministic
-(lặp lại cùng seed + cùng guess cho ra kết quả y hệt — đã kiểm chứng).
+⇒ **You cannot solve `/random` without pinning a `seed`.** With a seed it is fully deterministic (same seed + same guess ⇒ same result — verified).
 
-**Yêu cầu bắt buộc cho solver:** ở mode `random`, nếu người dùng không truyền `--seed`, solver
-**tự sinh một seed nguyên dương ngẫu nhiên một lần duy nhất tại đầu phiên**, in nó ra, rồi dùng
-seed đó cho **mọi** guess trong phiên. Như vậy "random word" vẫn đúng nghĩa đề bài (từ do server
-chọn, ta không biết), mà bài toán mới well-posed.
+**Hard requirement:** in `random` mode, if the user does not pass `--seed`, the CLI **generates one positive integer once at the start of the session**, prints it, and reuses it for **every** guess. The word is still chosen by the server (we do not know it); the problem is well-posed.
 
-> Đây là điểm ăn điểm cao nhất khi live. Hầu hết ứng viên sẽ hoặc không nhận ra, hoặc solver của họ
-> sẽ "không bao giờ hội tụ" mà không hiểu tại sao. Bạn nên nói thẳng phát hiện này ra trong buổi ghi hình.
+> Highest-value live beat. Most candidates either miss this, or their solver "never converges" and they do not know why. Say it out loud on camera.
 
 ---
 
-## 2. Luật tính điểm — ĐÃ KIỂM CHỨNG, và nó KHÔNG giống Wordle chuẩn
+## 2. Scoring — VERIFIED, and it is NOT standard Wordle
 
-API đánh giá **độc lập từng ô** (per-slot), **không** có cơ chế phân bổ theo số lần xuất hiện của
-Wordle thật:
+The API scores **each slot independently**. There is no Wordle-style duplicate allocator:
 
 ```
-Với mỗi vị trí i:
+For each index i:
   if   guess[i] === target[i]      → "correct"
   elif target.includes(guess[i])   → "present"
   else                             → "absent"
 ```
 
-Đã dự đoán trước rồi verify 5/5 case đối kháng khớp tuyệt đối (Phụ lục A). Ví dụ then chốt:
+Verified against live `/word` (Appendix A). The decisive pair:
 
-| target | guess | API trả về | Wordle chuẩn sẽ trả về |
+| target | guess | API | Standard Wordle |
 | --- | --- | --- | --- |
-| `apple` | `allee` | `c p p p c` | `c a p a c` (chỉ 1 chữ `l`, `e` thứ 2 đã dùng) |
+| `apple` | `allee` | `c p p p c` | `c a p a c` (only one `l`; second `e` already spent) |
 | `tests` | `ttttt` | `c p p c p` | `c a a c a` |
 | `apple` | `eeeee` | `p p p p c` | `a a a a c` |
 
-**Ba hệ quả bắt buộc phải code đúng:**
+**Three consequences the code must get right:**
 
-1. `absent` ⟺ chữ đó **không tồn tại ở bất cứ đâu** trong target (mạnh hơn Wordle chuẩn).
-   Không bao giờ có chuyện một chữ vừa `correct` ở ô này vừa `absent` ở ô khác.
-2. `present` **không mang thông tin về số lượng**. Không suy ra được "target có ≥2 chữ e".
-   ⇒ Không implement bộ ràng buộc min/max count như solver Wordle thường thấy. Nó sẽ **sai**.
-3. Đoán chữ trùng lặp là **lãng phí thuần** (`aaaaa` chỉ cho biết duy nhất "a có/không có trong từ
-   và ở đâu"). ⇒ Strategy phải **trừ điểm** guess có chữ lặp.
+1. `absent` ⟺ that letter occurs **nowhere** in the target (stronger than Wordle). A letter cannot be `correct` in one slot and `absent` in another.
+2. `present` carries **no count**. You cannot infer "target has ≥2 e's". Do **not** implement min/max-count constraints from a typical Wordle solver. They will be **wrong**.
+3. Repeated letters in a guess are **pure waste** (`aaaaa` only tells you whether `a` exists and where). Strategy must **penalise** repeats.
 
-**Ghi chú thú vị nên đưa vào README (thể hiện độ sâu, nhưng KHÔNG dùng làm solver):** vì per-slot
-độc lập, ta có thể *phá* game bằng 26 request `aaaaa`, `bbbbb`, …, `zzzzz` — mọi ô `correct` cho biết
-chính xác chữ tại ô đó, tái tạo được từ bí mật trong đúng 26 lượt, không cần từ điển.
-Tôi đã dùng đúng cách này để lấy ground truth: `seed=1 → fiery`, `seed=42 → wrote`,
-`seed=777 → poise`, `daily → vetch`. Nêu ra như một *security/semantics finding*, và nói rõ lý do
-không dùng: đề yêu cầu suy luận, không yêu cầu exploit; và nó tệ hơn (26 lượt vs ~4 lượt).
+**Worth a README paragraph (do not use as the solver):** because scoring is per-slot, you *could* reconstruct any secret with 26 guesses `aaaaa`…`zzzzz`. I used that only to get ground truth: `seed=1 → fiery`, `seed=42 → wrote`, `seed=777 → poise`, `daily → vetch`. Frame it as a semantics finding, and say why we do not ship it: the brief asks for inference, and 26 guesses lose to ~4.
 
 ---
 
-## 3. Từ điển — quyết định và tiêu chí nghiệm thu
+## 3. Dictionary — decision and acceptance
 
-Ground truth đã lấy được cho thấy target gồm cả từ hiếm (`vetch` = một loài cây họ đậu). ⇒ **Không
-dùng danh sách 2.315 đáp án Wordle chính thức**, sẽ trượt. Phải dùng danh sách **từ 5 chữ hợp lệ
-đầy đủ** (~13.000–16.000 từ).
+Ground truth includes rare words (`vetch`). ⇒ **Do not use Wordle's 2,315-answer list.** Use a full list of valid 5-letter words (~13k–16k).
 
-Cách làm (giữ runtime **zero dependency**):
+Keep **zero runtime dependencies**:
 
-1. Một script chỉ chạy lúc dev: `scripts/build-words.ts`, đọc từ một nguồn npm devDependency
-   (đề xuất: `word-list` của sindresorhus, MIT, dữ liệu từ SCOWL), lọc `^[a-z]{5}$`, sort, dedupe.
-2. Ghi ra `data/words5.txt`, **commit file này**. Runtime chỉ `readFile` — không cần cài gì để chạy.
-3. Ghi nguồn + license vào README (mục attribution — email nói rõ plagiarism sẽ bị đánh giá xấu).
+1. Dev-only script `scripts/build-words.ts` reads an npm **devDependency** (`word-list`, MIT, data from SCOWL), keeps `^[a-z]{5}$`, sort, dedupe.
+2. Write `data/words5.txt` and **commit it**. Runtime is `readFile` only.
+3. Credit source + license in README (the email is explicit about plagiarism).
 
-> **Đã dry-run:** `word-list` cho **12.578** từ 5 chữ và chứa đủ cả `fiery`, `wrote`, `poise`,
-> `vetch`. Đạt toàn bộ tiêu chí dưới đây. Dùng nguồn này, không cần tìm nguồn khác.
+> **Dry-run:** `word-list` yields **12,578** five-letter words and contains `fiery`, `wrote`, `poise`, `vetch`. Keep this source. It does **not** contain `agnew` / `votee` — that is why probe exists.
 
-**Tiêu chí nghiệm thu từ điển (bắt buộc chạy, fail thì đổi nguồn):**
+**Acceptance (fail the source if any of these miss):**
 
-- Kích thước trong khoảng 10.000–20.000 từ.
-- Phải chứa đủ 4 từ ground truth: `fiery`, `wrote`, `poise`, **`vetch`**.
-- Chạy benchmark offline (mục 6) với strategy `entropy` đạt tỉ lệ giải ≥ 97% trong 6 lượt.
-
-Nếu nguồn đã chọn thiếu `vetch`, thử `an-array-of-english-words`, hoặc danh sách
-"Wordle allowed guesses" (~14.855 từ) kèm attribution rõ ràng.
+- Size between 10,000 and 20,000.
+- Contains all four ground-truth words: `fiery`, `wrote`, `poise`, **`vetch`**.
+- Offline entropy on dictionary words typically ~4–5 guesses; do not invent a 1,000-game average in README unless this session ran a bench.
 
 ---
 
-## 4. Kiến trúc & cấu trúc repo
+## 4. Architecture and repo layout
 
-Ràng buộc: **TypeScript (ESM), Node ≥ 22.18, KHÔNG build step, không framework, runtime
-zero-dependency.**
+**TypeScript (ESM), Node ≥ 22.18, no build step, no framework, zero runtime deps.**
 
-Điều này khả thi vì đã kiểm chứng trên đúng máy sẽ dùng để live (`node v22.18.0`, `npm 10.9.2`):
+Verified on the live machine (`node v22.18.0`, `npm 10.9.2`):
 
-- `node src/cli.ts` **chạy trực tiếp file `.ts`, không cần flag, không cần `tsx`/`ts-node`/`tsc`.**
-  Node tự strip type annotation (type stripping đã bật mặc định từ 22.18).
-- `node --test` **tự tìm và chạy `test/**/*.test.ts`.** Không cần Vitest/Jest.
+- `node src/cli.ts` runs `.ts` **directly** — no `tsx` / `ts-node` / `tsc` emit. Type stripping is on by default from 22.18.
+- `node --test` runs `*.test.ts`. No Vitest/Jest.
 
-⇒ Có đủ type safety mà vẫn giữ được zero build step và zero runtime dependency. Đây là lựa chọn
-tốt nhất và là điểm nên nói ra khi live: *"tôi dùng TypeScript nhưng không có bước build — Node 22
-chạy `.ts` native, nên vòng lặp sửa-chạy nhanh như JS"*.
+**Three type-stripping landmines — they crash at runtime:**
 
-**Ba giới hạn của type stripping — vi phạm là crash lúc runtime, phải biết trước:**
+1. No `enum`, `namespace`, parameter properties, or `experimentalDecorators`. Use `type Mark = 'absent' | 'present' | 'correct'`.
+2. Imports need the **`.ts` extension**: `import { score } from './feedback.ts'` + `"allowImportingTsExtensions": true`.
+3. Type-only imports: `import type { … }` (`verbatimModuleSyntax`).
 
-1. **Không** dùng `enum`, `namespace`, parameter properties (`constructor(private x: T)`),
-   hay `experimentalDecorators`. Chúng cần *transform*, không chỉ *strip*. Dùng
-   `type Mark = 'absent' | 'present' | 'correct'` thay cho `enum`.
-2. Import phải ghi **đủ đuôi `.ts`**: `import { score } from './feedback.ts'`. Cần
-   `"allowImportingTsExtensions": true` trong `tsconfig.json`.
-3. Import chỉ chứa type phải dùng `import type { … }` (bật `verbatimModuleSyntax`).
-
-`tsc` vẫn có mặt nhưng **chỉ để type-check, không để build**: `npm run typecheck` = `tsc --noEmit`.
-`devDependencies`: `typescript`, `@types/node`, `word-list`. `dependencies`: **rỗng**.
-
-`tsconfig.json` tối thiểu: `strict: true`, `module/moduleResolution: nodenext`, `target: es2023`,
-`noEmit: true`, `allowImportingTsExtensions: true`, `verbatimModuleSyntax: true`.
+`tsc` is **type-check only**: `npm run typecheck` = `tsc --noEmit`. `devDependencies`: `typescript`, `@types/node`, `word-list`. `dependencies`: **empty**.
 
 ```
 votee-wordle-solver/
-├── package.json              # type:module, scripts, chỉ devDependencies
-├── tsconfig.json             # noEmit — chỉ để type-check
+├── package.json
+├── tsconfig.json
+├── PLAN.md                   # this spec (English). Keep it if the branch already has it.
 ├── README.md
-├── .gitignore                # node_modules
+├── .gitignore                # node_modules, .env — not this PLAN
 ├── data/
-│   └── words5.txt            # ~15k từ, 1 từ mỗi dòng (committed)
+│   ├── words5.txt
+│   └── opening.json          # { "word": "tares", "bits": 6.2024 }
 ├── scripts/
-│   └── build-words.ts        # dev-only, sinh data/words5.txt
+│   ├── build-words.ts
+│   └── best-opening.ts       # optional; too slow for the 2-hour recording
 ├── src/
-│   ├── types.ts              # Mark, Feedback, Oracle, SolveResult
-│   ├── api.ts                # 3 oracle → response đã normalize
-│   ├── feedback.ts           # luật scoring (bản local, mirror API)
-│   ├── filter.ts             # lọc candidate theo feedback
-│   ├── constraints.ts        # dẫn xuất ràng buộc — CHỈ để hiển thị (xem 5.3b)
-│   ├── strategy.ts           # chọn guess tiếp theo
-│   ├── solver.ts             # game loop, oracle-agnostic
-│   ├── bench.ts              # chạy nhiều ván offline, trả số liệu thuần (không in)
-│   ├── words.ts              # load từ điển + opening đã cache
-│   └── cli.ts                # parse arg, render output
+│   ├── types.ts
+│   ├── api.ts
+│   ├── feedback.ts
+│   ├── filter.ts
+│   ├── constraints.ts        # display only
+│   ├── strategy.ts
+│   ├── solver.ts
+│   ├── probe.ts              # dictionary-free fallback
+│   ├── bench.ts              # optional; skip in the 2-hour recording
+│   ├── words.ts
+│   ├── cli.ts
+│   └── server.ts             # slice 5: thin UI over the same solve()
+├── web/
+│   └── index.html            # English, light Wordle colours
 └── test/
-    ├── unit/                 # `npm test` — không cần mạng
-    │   ├── helpers.ts        # PRNG deterministic + lấy mẫu
-    │   ├── feedback.test.ts
-    │   ├── filter.test.ts
-    │   ├── constraints.test.ts
-    │   ├── strategy.test.ts
-    │   └── solver.test.ts    # gồm benchmark thu nhỏ
-    └── live/                 # `npm run test:live` — cần mạng
-        └── api.test.ts
+    ├── unit/
+    └── live/
 ```
 
-Tách `test/unit/` và `test/live/` thành hai thư mục thay vì dùng biến môi trường: set env
-cross-platform trên Windows lằng nhằng, còn hai script trỏ vào hai thư mục thì không thể sai.
-Lưu ý Node 22 **không nhận đường dẫn thư mục** cho `--test`, phải dùng glob:
-`node --test "test/unit/*.test.ts"`.
+Node 22 **does not** accept a directory path for `--test`. Use a glob: `node --test "test/unit/*.test.ts"`.
 
-Thực tế dry-run: **641 dòng** trong `src/`. Mỗi file một trách nhiệm, đọc là hiểu.
-
-`package.json` scripts (đã chạy được, copy nguyên):
+Scripts:
 
 ```
 start        : node src/cli.ts
 solve:random : node src/cli.ts --mode random
 solve:daily  : node src/cli.ts --mode daily
-bench        : node src/cli.ts --mode bench
+web          : node src/server.ts                    # slice 5
 test         : node --test "test/unit/*.test.ts"
 test:live    : node --test "test/live/*.test.ts"
 typecheck    : tsc --noEmit
 build:words  : node scripts/build-words.ts
-build:opening: node scripts/best-opening.ts
 ```
 
-`tsconfig.json` đã kiểm chứng với TypeScript 7.0.2: bật thêm `erasableSyntaxOnly` để **compiler chặn
-sẵn** `enum`/`namespace`/parameter property — nhờ vậy lỗi type stripping thành lỗi type-check thay vì
-crash lúc chạy. Kèm `noUncheckedIndexedAccess` (đáng giá vì code truy cập `word[i]` liên tục).
+Enable `erasableSyntaxOnly` so `enum` / `namespace` / parameter properties fail at type-check instead of at runtime. `noUncheckedIndexedAccess` is worth it (`word[i]` everywhere).
 
-### Data shape dùng xuyên suốt (`src/types.ts`, chốt cứng, không đổi)
+### Shared types (`src/types.ts`, freeze these)
 
 ```ts
-type Mark     = 'absent' | 'present' | 'correct'   // KHÔNG dùng enum — type stripping không hỗ trợ
+type Mark     = 'absent' | 'present' | 'correct'   // no enum
 type Feedback = Mark[]        // length = size, index = slot
 type Oracle   = (guess: string) => Promise<Feedback>
 ```
 
-`Feedback` **không** giữ lại hình dạng `{slot, guess, result}` của API — normalize ngay tại `api.ts`.
-
-Quy tắc quan trọng: **`api.ts` là biên giới duy nhất biết đến hình dạng response của Votee.** Mọi
-module khác chỉ thấy `Mark[]`. Nhờ vậy solver test được hoàn toàn offline.
+`Feedback` does **not** keep `{slot, guess, result}`. Normalise in `api.ts`. **`api.ts` is the only module that knows Votee's response shape.** Everything else sees `Mark[]`, so the solver tests offline.
 
 ---
 
-## 5. Spec từng module (contract, không phải code)
+## 5. Module contracts
 
 ### 5.1 `src/api.ts`
 
-Export:
-
-| Hàm | Signature | Ghi chú |
+| Function | Signature | Notes |
 | --- | --- | --- |
-| `createWordOracle` | `(target: string) => Oracle` | `GET /word/{target}?guess=…` |
-| `createRandomOracle` | `(seed: number, size: number) => Oracle` | `GET /random?guess=…&size=…&seed=…`, **seed bắt buộc** |
+| `createWordOracle` | `(target: string) => Oracle` | `GET /word/{target}?guess=…` — reject non `a-z` targets |
+| `createRandomOracle` | `(seed: number, size: number) => Oracle` | **seed required** (throw if missing / not a non-negative integer) |
 | `createDailyOracle` | `(size: number) => Oracle` | `GET /daily?guess=…&size=…` |
 
-Base URL: `https://wordle.votee.dev:8000`, đặt thành một hằng ở đầu file, cho phép override qua
-`process.env.VOTEE_BASE_URL`.
+Base URL `https://wordle.votee.dev:8000`, overridable via `VOTEE_BASE_URL`.
 
-Yêu cầu hành vi:
+- Normalise guess: `trim().toLowerCase()`.
+- Build `Feedback` by `item.slot`, **not** array order. Throw if a slot is missing.
+- HTTP errors: throw with status + URL + body. Retry **network/5xx only**, max 2, backoff 300ms/900ms. Never retry 4xx.
 
-- Normalize guess: `trim().toLowerCase()` trước khi gửi. (API nhận `ARISE` nhưng luôn echo lowercase.)
-- Response là **array không đảm bảo thứ tự** theo hợp đồng ⇒ dựng `Feedback` bằng cách gán theo
-  `item.slot`, **không** dựa vào thứ tự phần tử. Sau khi dựng, assert không còn ô nào trống —
-  nếu có, throw (API trả thiếu slot là lỗi thật, không được im lặng).
-- Lỗi HTTP: **không** trả `null`, không retry vô hạn. Throw `Error` với message chứa status + URL +
-  body. Riêng `400` là lỗi lập trình của ta (xem bảng validation dưới) ⇒ message phải nói rõ.
-- Retry: chỉ retry với lỗi mạng/5xx, tối đa 2 lần, backoff 300ms/900ms. Không retry 4xx.
+Verified server validation:
 
-Validation của server (đã kiểm chứng — dùng để viết message lỗi cho đúng):
-
-| Tình huống | Kết quả thật |
+| Case | Result |
 | --- | --- |
-| `guess.length !== size` | `400 Bad Request` |
-| guess chứa ký tự không phải chữ (`ar1se`) | `400 Bad Request` |
-| `seed` âm | `500 Internal Server Error` ⇒ seed ta sinh phải là số nguyên dương |
-| `size` khác 5 (4, 6) | Hợp lệ, hoạt động bình thường |
-| `/word/{target}` không cần `size` | Hợp lệ, suy ra từ độ dài target |
+| `guess.length !== size` | `400` |
+| non-letter in guess (`ar1se`) | `400` |
+| negative `seed` | `500` ⇒ we only generate positive integers |
+| `size` 4 or 6 | OK |
+| `/word/{target}` without `size` | OK (length of target) |
 
 ### 5.2 `src/feedback.ts`
 
-| Hàm | Signature | Hành vi |
-| --- | --- | --- |
-| `score` | `(guess: string, target: string) => Feedback` | Implement **đúng** luật mục 2, per-slot |
-
-Đây là bản mô phỏng local của server. Dùng cho: benchmark offline, và (quan trọng) một test đối
-chiếu chạy thật với `/word/{target}` để chứng minh mô hình của ta khớp API.
+`score(guess, target)` implements section 2 **exactly**. Local mirror of the server. Also export `patternKey`, `encode`, `isSolved`, `createLocalOracle`.
 
 ### 5.3 `src/filter.ts`
 
-| Hàm | Signature | Hành vi |
-| --- | --- | --- |
-| `isConsistent` | `(candidate, guess, feedback) => boolean` | true nếu `candidate` có thể là target |
-| `filterCandidates` | `(candidates: string[], guess, feedback) => string[]` | lọc danh sách |
+`isConsistent` / `filterCandidates`: keep a candidate iff `patternKey(guess, candidate) === encode(feedback)`. One idea: *"if X were the secret, the server would have returned `score(guess, X)`."*
 
-Cách implement `isConsistent` **được khuyến nghị mạnh**: `score(guess, candidate)` bằng đúng
-`feedback` (so sánh từng phần tử). Một dòng, không thể sai lệch so với server, và không cần viết
-tay các luật ràng buộc riêng lẻ.
-
-Ý tưởng đằng sau, phải nói được khi live: *"nếu candidate X là từ bí mật thật, thì server đã phải
-trả về `score(guess, X)`. Server trả về `feedback`. Vậy X còn khả thi ⟺ `score(guess, X) === feedback`."*
-Đây là suy luận ngược, và nó đúng **chính xác** vì `score` là bản mirror của luật server (mục 2 đã
-verify 5/5).
-
-### 5.3b `src/constraints.ts` — CHỈ để hiển thị, KHÔNG để lọc
-
-Đây là "constraint model": thay vì so khớp cả pattern, ta **tích luỹ tri thức tường minh** về từ bí
-mật qua các lượt. Bốn cấu trúc:
+### 5.3b `src/constraints.ts` — display only, never the filter
 
 ```ts
 type Knowledge = {
-  fixed:     (string | null)[]   // fixed[0]='f' → ô 0 chắc chắn là 'f'        (từ 'correct')
-  required:  Set<string>         // chữ chắc chắn CÓ trong từ, chưa biết ở đâu (từ 'present')
-  forbidden: Set<string>         // chữ chắc chắn KHÔNG có ở bất kỳ đâu        (từ 'absent')
-  bannedAt:  Set<string>[]       // bannedAt[1] ∋ 'r' → ô 1 chắc chắn KHÔNG phải 'r'
+  fixed:     (string | null)[]
+  required:  Set<string>
+  forbidden: Set<string>
+  bannedAt:  Set<string>[]
 }
 ```
 
-Luật cập nhật, với mỗi ô `i` mang chữ `c`:
+`correct` → `fixed[i]`; `present` → `required` + `bannedAt[i]`; `absent` → `forbidden`.
 
-| Feedback tại ô i | Cập nhật |
-| --- | --- |
-| `correct` | `fixed[i] = c` |
-| `present` | `required.add(c)` **và** `bannedAt[i].add(c)` |
-| `absent` | `forbidden.add(c)` |
-
-Ví dụ thật (target `fiery`, guess `crane` → API trả `a p a a p`):
-
-```
-forbidden = {c, a, n}        ← c,a,n không có trong "fiery"
-required  = {r, e}           ← r,e có trong "fiery" nhưng sai vị trí
-bannedAt[1] = {r}            ← 'r' không ở ô 1
-bannedAt[4] = {e}            ← 'e' không ở ô 4
-fixed     = [_, _, _, _, _]  ← chưa biết ô nào
-```
-
-Một candidate hợp lệ ⟺ khớp mọi `fixed`, chứa mọi chữ trong `required`, không chứa chữ nào trong
-`forbidden`, và không vi phạm `bannedAt`.
-
-**Quyết định thiết kế: dùng constraint model để KỂ, dùng score-match để LỌC.**
-
-Lý do: với luật per-slot, hai cách **tương đương hoàn toàn về mặt logic** — mỗi mark ánh xạ 1-1 sang
-một ràng buộc (`correct`→fixed, `present`→required+bannedAt, `absent`→forbidden), không mất mát
-thông tin. Nhưng score-match là một *hàm thuần một dòng*, còn constraint model là *4 cấu trúc mutable
-phải maintain qua nhiều lượt* — nhiều bề mặt lỗi hơn mà không lọc chính xác hơn.
-
-Ngược lại, constraint model **kể chuyện tốt hơn nhiều**. Nó cho phép in ra:
+With per-slot scoring the two models are logically equivalent, but score-match is a one-line pure function. Constraints print:
 
 ```
 known: f _ _ _ _   must have: r, e   ruled out: c, a, n   not at: r@1, e@4
 ```
 
-Đó là thứ người xem recording hiểu ngay, còn "candidates: 15342 → 41" thì không giải thích *vì sao*.
-
-⇒ `constraints.ts` export `updateKnowledge(knowledge, guess, feedback)` và `describe(knowledge)`,
-`cli.ts` gọi để in. `solver.ts` **không** phụ thuộc vào nó. Tách rõ "logic" và "narrative" như vậy
-vừa an toàn vừa demo tốt — và bản thân việc bạn giải thích được *tại sao tách* chính là điểm cộng.
-
-> Nếu muốn, thêm một test `constraints.test.ts` chứng minh hai cách cho kết quả lọc **giống nhau**
-> trên 200 cặp (target, guess) ngẫu nhiên. Test này biến "tôi tin chúng tương đương" thành "tôi
-> chứng minh chúng tương đương" — rất đáng 5 phút.
+`solver.ts` must **not** import this file. `cli.ts` does.
 
 ### 5.4 `src/strategy.ts`
 
-| Hàm | Signature | Hành vi |
-| --- | --- | --- |
-| `pickGuess` | `(candidates: string[], opts) => string` | chọn guess kế tiếp, **deterministic** |
+`pickGuess` is **deterministic**. These helpers must be **named functions** (do not inline): `partitionSizes`, `entropyBits`, `worstCase` (`Math.max` of bucket sizes), `scoreByFrequency`. Three strategies share `partitionSizes`:
 
-Thuật toán: **positional letter frequency + penalty chữ lặp** (bám ý tưởng của "The Dodgy Engineer"
-trong `optimizing-wordle.md`, nhưng đã sửa lại — xem ghi chú bên dưới).
+- **freq** (pickGuess default if called with no strategy): sum of per-slot counts, maximize, `score * 0.5 ** duplicates`. **Do not** use `Π(maxFreq − freq)` — one maxed slot zeroes the product and you get a pile of ties. That formula is from The Dodgy Engineer; we adapted it. Never name this `bestFreq`.
+- **entropy** (`solve` default): Shannon bits, maximize.
+- **minimax**: call `worstCase(partitionSizes(...))`, minimize (Knuth 1976). Do not inline `Math.max`.
 
-```
-1. freq[pos][letter] = số candidate có `letter` tại `pos`
-2. score(word) = Σ_{pos=0..n-1} freq[pos][word[pos]]
-3. Nếu word có chữ lặp: score *= 0.5 ^ (số chữ bị lặp)     // per-slot ⇒ chữ lặp gần như vô ích
-4. Chọn score CAO nhất. Tie-break bằng thứ tự alphabet     // để deterministic
-```
+If `|C| > 300`, skip partitioning and use `freq`. If `|C| ≤ 30` and `attemptsLeft > 1`, the guess may come from the full dictionary.
 
-Ghi chú bắt buộc đọc — **đừng copy nguyên đoạn code trong `optimizing-wordle.md`**:
+Tie-break: prefer a guess still in `candidates`, then alphabetical.
 
-- Đoạn code đó bị **lỗi cú pháp** (mấy chỗ `= ;` và `= ` là array literal bị mất khi trích xuất) và
-  **lỗi logic** (`return words` / `bestWord = words` thay vì `words[0]`).
-- Công thức của nó là `Π (maxFreq[pos] − freq[pos])` rồi **minimize**. Cái này vỡ khi bất kỳ ô nào có
-  `freq === maxFreq`: tích thành 0, hàng loạt từ đồng điểm 0 ⇒ về bản chất là chọn bừa. Công thức
-  tổng-tần-suất-maximize ở trên đơn giản hơn, tương đương về ý tưởng ("chọn chữ phổ biến theo vị
-  trí"), và không có bệnh lý đó.
-- README phải credit: kênh **The Dodgy Engineer** (ý tưởng positional frequency), **3Blue1Brown**
-  (framing information theory), **NYT "Best Wordle Tips"** (heuristic dàn chữ/nguyên âm), và ghi rõ
-  là *đã điều chỉnh*, không phải sao chép.
+Opening word: **not** Wordle's `soare` (7th here). Computed: **`tares` — 6.2024 bits**. Write `data/opening.json`; do not run the full sweep during the 2-hour recording.
 
-Guess mở đầu: **không hardcode `slate`.** Tính bằng `scripts/best-opening.ts` (entropy trên toàn từ
-điển) và ghi ra `data/opening.json`.
+Measured **offline, before the recording** (same sample, same opening). Do not paste these into README unless this session ran a bench:
 
-> **Đã dry-run.** Kết quả là **`tares` — 6,2024 bits**, trên `lares` (6,1560) và `rales` (6,1206).
-> Đáng chú ý: `soare` — từ mở đầu tối ưu quen thuộc của Wordle chuẩn — chỉ xếp **thứ 7** ở đây, đúng
-> như dự đoán rằng luật per-slot đổi thứ tự tối ưu. Đây là dữ kiện tốt để nói khi live.
->
-> Sweep toàn bộ 12.578² cặp chỉ mất **3 giây** nhờ mã hoá pattern thành số base-3
-> (`absent=0, present=1, correct=2`) rồi đếm bằng `Int32Array(243)`, tránh cấp phát 158 triệu string.
-> Nhanh đến mức cache chỉ còn là tiện lợi.
->
-> Nhưng đừng kỳ vọng nhiều: đổi từ `cares` (heuristic chọn) sang `tares` chỉ đổi số lượt trung bình
-> khoảng 0,01. **Strategy quyết định gần như toàn bộ kết quả, không phải opening word.**
+| Strategy | n | Solved | Avg guesses | Time |
+| --- | --- | --- | --- | --- |
+| `entropy` | 1000 | **99.0%** | **4.22** | 39.7s |
+| `minimax` | 300 | 99.7% | 4.29 | 12.4s |
+| `freq` | 300 | 90.7% | 4.28 | 0.6s |
 
-#### Nâng cấp: `--strategy=minimax` (Milestone 7)
-
-**Minimax là gì.** Heuristic tần suất ở trên chỉ *đoán* xem guess nào tốt, thông qua một proxy là
-"chữ phổ biến theo vị trí". Minimax thì **đo trực tiếp** guess đó chia nhỏ không gian tìm kiếm tốt
-đến đâu.
-
-Quan sát nền tảng: khi ta đoán `g`, mọi candidate còn lại được **phân hoạch thành các nhóm theo
-pattern feedback** mà chúng sẽ tạo ra. Server trả về một pattern ⇒ candidate set mới **chính là**
-nhóm ứng với pattern đó. Ta chưa biết sẽ rơi vào nhóm nào, nên đánh giá guess bằng **trường hợp xấu
-nhất**: kích thước nhóm lớn nhất.
-
-Ví dụ, còn 100 candidate:
-
-| Guess | Các nhóm sinh ra | Nhóm lớn nhất (worst case) |
-| --- | --- | --- |
-| `A` | 60 / 25 / 15 | **60** |
-| `B` | 20 / 18 / 15 / 13 / 12 / 10 / 7 / 5 | **20** |
-
-Đoán `B` **đảm bảo** còn ≤ 20 từ; đoán `A` có thể còn tới 60. ⇒ Chọn `B`.
-
-```
-minimax(g) = max over pattern p của | { c ∈ candidates : score(g, c) === p } |
-pickGuess  = argmin over g của minimax(g)        // tie-break: ưu tiên g ∈ candidates, rồi alphabet
-```
-
-Tie-break "ưu tiên `g` nằm trong candidates" rất quan trọng: nếu hai guess chia nhóm bằng nhau, chọn
-cái **có thể chính là đáp án** để có cơ hội thắng ngay lượt này.
-
-**Hai biến thể nên biết để nói khi live** (cùng phân hoạch, khác cách chấm):
-
-- **Expected size** — `Σ |nhóm|² / |C|`, rồi minimize. Tối ưu *trung bình* thay vì *xấu nhất*.
-- **Entropy** — `Σ −p·log₂ p` với `p = |nhóm|/|C|`, rồi maximize. Đây chính là "information gain"
-  theo nghĩa lý thuyết thông tin, là cách tiếp cận của video 3Blue1Brown.
-
-Thực tế entropy/expected thường tốt hơn minimax một chút về số lượt trung bình, còn minimax cho
-**đảm bảo** về worst case. Cả ba đều dùng chung một bước phân hoạch, nên khi đã code xong minimax
-thì thêm biến thể chỉ là đổi hàm chấm điểm — nếu còn thời gian, benchmark cả ba và đưa bảng vào README.
-
-**Chi phí và cách chặn.** Phân hoạch với mọi guess ứng viên là `O(|G| · |C| · n)`. Với
-`|G| = |C| = 15.000` thì ~225 triệu phép `score` ⇒ **quá chậm cho lượt 1**. Cách xử lý:
-
-- Lượt 1: dùng opening word đã cache (candidate set là toàn bộ từ điển, luôn cho cùng kết quả).
-- Từ lượt 2: chỉ bật minimax khi `candidates.length ≤ 300` (sau lượt 1 gần như luôn thoả).
-- Guess pool: mặc định `G = candidates`. **Tuỳ chọn nâng cao:** cho phép `G` = toàn từ điển khi
-  `candidates.length ≤ 30` và còn ≥ 2 lượt. Lý do là tình huống kinh điển kiểu `_ight`
-  (`light/might/night/right/sight/tight`): mọi candidate chỉ khác nhau 1 chữ nên đoán trong nhóm chỉ
-  loại được 1 từ mỗi lượt và sẽ hết lượt; một từ "dò" như `mirth` không thể là đáp án nhưng tách
-  được nhiều từ cùng lúc. **Đây là khoảnh khắc demo đẹp nhất** — nếu bắt được nó trong recording,
-  hãy dừng lại giải thích.
-
-> **Đã dry-run — kết quả đảo ngược đề xuất ban đầu của plan.** Đo trên cùng mẫu, cùng opening:
->
-> | Strategy | Mẫu | Giải được | Số lượt TB | Thời gian |
-> | --- | --- | --- | --- | --- |
-> | `entropy` | 1000 | **99,0%** | **4,22** | 39,7s |
-> | `entropy` | 300 | 99,3% | 4,18 | 10,9s |
-> | `minimax` | 300 | 99,7% | 4,29 | 12,4s |
-> | `freq` | 300 | 90,7% | 4,28 | 0,6s |
->
-> ⇒ **Mặc định là `entropy`**, không phải `freq`. `freq` nhanh hơn 20 lần nhưng thất bại nhiều gấp 9,
-> nên chỉ giữ nó làm fallback khi còn > 300 candidate (lúc đó phân hoạch quá đắt) và làm mốc so sánh.
->
-> Minimax cho tỉ lệ giải cao nhất nhưng số lượt trung bình tệ hơn — đúng bản chất: nó tối ưu trường
-> hợp xấu nhất, không tối ưu trung bình. Implement cả ba vì chúng dùng chung bước phân hoạch, chi phí
-> thêm chỉ là hai hàm chấm điểm, và bảng so sánh này chính là thứ đáng đưa vào README.
->
-> Nới `maxPartitionCandidates` từ 300 lên 2000 **không cải thiện** (4,20 vs 4,17) mà chậm gấp đôi.
-> Giữ 300. Ghi lại thí nghiệm này trong README như một ví dụ "đo trước khi tối ưu".
+Default **entropy**. `freq` is the cheap fallback above 300 candidates.
 
 ### 5.5 `src/words.ts`
 
-| Hàm | Signature | Hành vi |
-| --- | --- | --- |
-| `loadWords` | `(size = 5) => string[]` | đọc `data/words5.txt`, filter đúng `size`, lowercase, unique |
-
-Nếu `size !== 5` mà không có từ điển tương ứng ⇒ throw message rõ ràng ("chỉ hỗ trợ size 5, đã có
-`data/words5.txt`; sinh thêm bằng `npm run build:words`"). Đừng cố hỗ trợ mọi size trong bản đầu.
+`loadWords(5)` reads `data/words5.txt`. `loadOpening()` reads `data/opening.json` or returns `undefined`. CLI: `loadOpening() ?? 'tares'`.
 
 ### 5.6 `src/solver.ts`
 
-```
-solve({ oracle, words, size, maxAttempts = 6, onProgress }) =>
-  { solved: boolean, answer: string|null, attempts: number, history: [{guess, feedback, remaining}] }
-```
+Oracle-agnostic loop. `maxAttempts` 6 for the dictionary phase. No `console.log` (use `onProgress`).
 
-Vòng lặp:
+If candidates empty and `fallback === false` → `DictionaryGapError`. If `fallback === true` (default) → `resolveByProbing` (after slice 4; before that, return unsolved — do not import `probe.ts` yet).
 
-```
-candidates = words
-for attempt in 1..maxAttempts:
-    guess    = pickGuess(candidates)
-    feedback = await oracle(guess)
-    onProgress({attempt, guess, feedback, ...})
-    if feedback mọi ô đều 'correct' → solved, answer = guess, return
-    candidates = filterCandidates(candidates, guess, feedback)
-    if candidates.length === 0 → throw DictionaryGapError(...)   // xem mục 8
-return { solved: false, ... }
-```
+### 5.7 `src/probe.ts`
 
-Hai điều solver **không** được làm: không `console.log` (dùng `onProgress` callback — nhờ đó test
-im lặng, CLI đẹp), và không biết `seed`/endpoint nào (nhận `oracle` đã dựng sẵn).
+Per-slot scoring means one guess is five letter tests. Track `fixed`, `absent`, `bannedAt`, `floating`. `deduce()`: a present letter with only one legal slot is placed immediately. Reuse settled slots to park untested letters. Cap 40. Optional all-green confirmation submit.
 
-### 5.7 `src/cli.ts`
+First on-camera demo of a missing dictionary word is **`zzzzz`** or **seed=38 → `agnew`**. Do not assume `votee` was already run.
 
-```
-node src/cli.ts --mode random [--seed 12345] [--size 5] [--strategy freq|minimax]
-node src/cli.ts --mode daily
-node src/cli.ts --mode word --target apple
-node src/cli.ts --mode bench [--count 200] [--seed 1]
-```
+### 5.8 `src/cli.ts`
 
-Parse arg **thủ công** bằng `process.argv` (hoặc `node:util` `parseArgs`) — không thêm `yargs`/`commander`.
+`node:util` `parseArgs`. Modes: `random | daily | word | offline`. Print the seed. ANSI colours, no `chalk`. Exit 0 / 1 / 2. Do not import `bench.ts` / `probe.ts` in slice 3.
 
-Yêu cầu output (buổi live được ghi hình, output chính là phần thuyết trình của bạn):
+### 5.9 `src/server.ts` + `web/index.html` (slice 5)
 
-```
-Votee Wordle Solver
-mode=random  size=5  seed=1  strategy=freq      ← seed PHẢI in ra, để reproduce được
-dictionary: 15,342 words
-
-#1  crane   absent present absent absent present
-    known: _ _ _ _ _   must have: r,e   ruled out: c,a,n   not at: r@1, e@4
-    candidates: 15,342 → 218
-
-#2  ...
-
-SOLVED  "fiery"  in 4 guesses
-```
-
-Dòng `known/must have/ruled out/not at` lấy từ `constraints.ts` (mục 5.3b). Ví dụ trên là feedback
-**thật** của `crane` với `seed=1` (đáp án `fiery`) — dùng đúng nó khi test render.
-
-Bắt buộc: in `seed`, in số candidate còn lại sau mỗi lượt (đây là bằng chứng thuật toán đang hoạt
-động), và tô màu bằng ANSI escape thuần (`\x1b[42m`…) — **không** thêm `chalk`.
-
-Exit code: `0` nếu giải được, `1` nếu hết lượt, `2` nếu lỗi API/từ điển.
+`node:http`. `GET /api/solve?mode=&strategy=&seed=&target=` returns JSON `{ ...solve result, seed, dictionarySize }`. Serve `web/index.html` at `/`. Same `solve()` as the CLI — no algorithm in the browser. Light Wordle colours. Numbered fields. Hide seed unless `/random`, hide target unless `/word`. English copy. No dark dashboard. No invented 99% / 4.22 in the UI.
 
 ---
 
-## 6. Chiến lược test
+## 6. Tests
 
-Nguyên tắc: **toàn bộ logic test được offline, không cần mạng.** Test mạng tách riêng và opt-in
-(mạng sập giữa buổi live thì `npm test` vẫn xanh).
+All logic tests **offline**. Live tests opt-in (`npm run test:live`) so a dead network does not fail `npm test`.
 
-### 6.1 `feedback.test.ts` — dùng chính các case đã verify với server thật
+### 6.1 `feedback.test.ts` — live API pairs, hardcoded
 
-Đây là các cặp input/output **thực tế từ API** (không phải tôi tự nghĩ ra). Hardcode làm bảng test:
-
-| target | guess | expected (a=absent, p=present, c=correct) |
+| target | guess | expected |
 | --- | --- | --- |
-| `apple` | `apple` | `c c c c c` |
-| `apple` | `zzzzz` | `a a a a a` |
-| `apple` | `arise` | `c a a a c` |
-| `apple` | `allee` | `c p p p c` |
-| `apple` | `eeeee` | `p p p p c` |
-| `apple` | `pppaa` | `p c c p p` |
-| `apple` | `pzzzp` | `p a a a p` |
-| `tests` | `tooot` | `c a a a p` |
-| `tests` | `ttttt` | `c p p c p` |
-| `teyyy` | `ttttt` | `c p p p p` |
+| `apple` | `apple` | `ccccc` |
+| `apple` | `zzzzz` | `aaaaa` |
+| `apple` | `arise` | `caaac` |
+| `apple` | `allee` | `cpppc` |
+| `apple` | `eeeee` | `ppppc` |
+| `apple` | `pppaa` | `pccpp` |
+| `apple` | `pzzzp` | `paaap` |
+| `tests` | `tooot` | `caaap` |
+| `tests` | `ttttt` | `cppcp` |
+| `teyyy` | `ttttt` | `cpppp` |
 
-### 6.2 `filter.test.ts`
+### 6.2–6.4
 
-- Target thật luôn nằm trong danh sách sau khi lọc (property test: với 100 target ngẫu nhiên và 100
-  guess ngẫu nhiên, `isConsistent(target, guess, score(guess, target))` luôn true).
-- `absent` loại bỏ mọi từ chứa chữ đó ở **bất kỳ** vị trí.
-- `present` loại từ có chữ đó ở đúng vị trí đã đoán.
-- Sau khi lọc bằng feedback all-correct, còn lại đúng 1 từ.
-- **Tương đương constraint ⇄ score-match** (mục 5.3b): với 200 cặp `(target, guess)` ngẫu nhiên
-  deterministic, lọc bằng `Knowledge` và lọc bằng `score`-so-khớp cho ra **cùng một tập**. Test này
-  biến "tôi tin hai cách tương đương" thành "tôi chứng minh được".
+Filter: the true target always survives; `absent` drops that letter everywhere; all-correct leaves one word. Strategy: deterministic; one candidate returns it; freq penalises repeats. Solver (slice 2): local oracle solves `apple` / `fiery`; do not test `zzzzz` yet. After probe: `zzzzz` still solves; `fallback: false` on a missing word throws `DictionaryGapError`.
 
-### 6.3 `strategy.test.ts`
+### 6.5 `test/live/api.test.ts`
 
-- Deterministic: gọi 2 lần cùng input ⇒ cùng output.
-- `candidates.length === 1` ⇒ trả về chính từ đó.
-- Guess được chọn có nhiều chữ phân biệt hơn phương án chữ lặp, khi điểm tần suất xấp xỉ nhau.
+Slice 3:
 
-### 6.4 `solver.test.ts` — quan trọng nhất
+- Contract: local `score()` matches live `/word` on the table above.
+- `/random?seed=1` twice → identical; solve → `fiery`.
+- `/random` without seed, several fetches → more than one secret (raw `fetch`; the oracle forbids a missing seed).
 
-Dựng một **oracle offline** từ `score()` (chính là `createWordOracle` nhưng local). Rồi:
-
-- Giải đúng 4 ground truth: `fiery`, `wrote`, `poise`, `vetch`.
-- **Benchmark** trong test: mẫu **150** từ (chạy ~5s, đủ nhanh để nằm trong `npm test`). Assert:
-  - tỉ lệ giải trong 6 lượt **≥ 97%**
-  - số lượt trung bình **≤ 4,4**
-- Hai ngưỡng trên là **số đo được** (`entropy` đạt 99,0% và 4,22 lượt trên mẫu 1.000), đã nới ra chút
-  cho dao động của mẫu nhỏ. Ngưỡng ≥99%/≤4,2 mà plan đoán lúc đầu là **sai** — xem mục 0.5.
-- Benchmark đầy đủ (1.000 mẫu, phân bố 1..6 lượt) chạy qua CLI `--mode bench --count 1000`, không đưa
-  vào `npm test` vì mất ~40s.
-- Nếu assert fail ⇒ **không nới lỏng ngưỡng**. Xem lại từ điển hoặc strategy.
-
-### 6.5 `test/live/api.test.ts` — integration, chạy bằng `npm run test:live`
-
-- **Contract test (test giá trị nhất trong repo):** với target `apple` và 5 guess ở bảng 6.1, gọi
-  `/word/apple` thật và assert response khớp `score()` local. Đây là bằng chứng mô hình của ta đúng
-  bằng API thật — nói câu này khi live.
-- Giải `/random?seed=1` end-to-end, assert answer `=== 'fiery'`.
-- Giải `/daily` end-to-end, assert solved (không assert từ cụ thể — nó đổi mỗi ngày).
-- Assert `/random` **không seed** gọi 2 lần có thể ra feedback khác nhau ⇒ tài liệu hoá phát hiện
-  mục 1 bằng một test (test này có thể flaky về lý thuyết; đánh dấu và giải thích trong comment,
-  hoặc gọi 6 lần và assert "có ít nhất 2 kết quả khác nhau").
+Slice 4 **add**: seed=38 → `agnew` and history has `phase === 'probe'`. Optional: `/daily` solves (do not assert the word).
 
 ---
 
-## 7. Milestones — thứ tự tối ưu cho buổi live coding
+## 7. Live-coding order (2-hour recording)
 
-Nguyên tắc sắp xếp: **có demo chạy được sớm nhất có thể**, rồi mới làm đẹp. Mỗi milestone kết thúc ở
-trạng thái commit được.
+Ship a working demo early. Each slice ends in a committable state. **Do not dump the whole tree in one prompt.**
 
-| # | Việc | Thời lượng | Trạng thái đạt được |
-| --- | --- | --- | --- |
-| 0 | `npm init`, `package.json` (`type:module`), `tsconfig.json`, `.gitignore`, `src/types.ts`, `scripts/build-words.ts`, sinh `data/words5.txt`, **verify tiêu chí mục 3** | 12' | Có từ điển đã kiểm chứng, `node src/…ts` chạy được |
-| 1 | `feedback.ts` + `feedback.test.ts` (bảng 6.1) | 10' | Luật scoring đúng, có test xanh |
-| 2 | `filter.ts` + test | 8' | Lọc được candidate |
-| 3 | `strategy.ts` (heuristic tần suất) + test | 12' | Chọn được guess |
-| 4 | `solver.ts` + `solver.test.ts` với oracle offline | 12' | **Giải được offline — demo đầu tiên** |
-| 5 | `api.ts` + `cli.ts`, mode `word` rồi `daily` rồi `random` | 15' | **Giải được puzzle thật qua mạng** |
-| 6 | `constraints.ts` + đấu nối vào output CLI | 8' | Output kể được *vì sao* |
-| 7 | Benchmark + `api.test.ts` contract test | 10' | Có số liệu cho README |
-| 8 | `--strategy=minimax` + so sánh benchmark | 15' | Điểm cộng lớn nhất |
-| 9 | `npm run typecheck` sạch + README theo mục 9 | 18' | Sẵn sàng submit |
-
-Nếu thời gian phiên ghi hình bị bó: milestone 0–5 là **bắt buộc** (đây là bộ xương, thiếu là không
-có gì để demo); 6 và 8 là hai thứ *ăn điểm* nên ưu tiên hơn 7; 7 và 9 làm được offline sau khi
-tắt máy ghi.
-
-**Cảnh báo về milestone 8:** minimax dễ ngốn quá 15 phút nếu bạn vừa code vừa giải thích. Nếu đến
-phút thứ 10 vẫn chưa chạy được, `git stash` và quay lại heuristic — có một solver hoạt động tốt quan
-trọng hơn một solver tối ưu đang lỗi. Nói thẳng câu đó ra khi live cũng là một tín hiệu tốt về
-engineering judgement.
-
-**Chốt thứ tự mode ở milestone 5 là có lý do:** `word` trước (biết đáp án, dễ debug nhất) → `daily`
-(ẩn nhưng ổn định) → `random` (ẩn + cần seed). Nếu có bug, bạn phát hiện ở bước dễ nhất.
-
----
-
-## 8. Rủi ro & edge case — kèm cách xử lý bắt buộc
-
-| Rủi ro | Mức độ | Xử lý |
+| Slice | What | Done when |
 | --- | --- | --- |
-| **Từ bí mật không có trong từ điển của ta** ⇒ candidates rỗng | Cao | Throw `DictionaryGapError` với message rõ: "danh sách candidate rỗng sau lượt N — từ bí mật không có trong từ điển". **Tuyệt đối không im lặng, không fallback đoán bừa.** Thà fail rõ ràng và giải thích được khi live. Có thể thêm fallback tuỳ chọn: nới dần bằng cách chỉ giữ ràng buộc `correct` |
-| **Quên ghim `seed` ở mode random** | Cao | Solver không cho phép tạo random oracle mà thiếu seed (throw). CLI sinh + in seed |
-| Copy nguyên code từ `optimizing-wordle.md` | Cao | Code đó lỗi cú pháp + lỗi logic. Xem mục 5.4. Phải viết lại |
-| Implement duplicate-handling kiểu Wordle chuẩn | Cao | Sẽ **sai** so với API này. Xem mục 2 |
-| Mạng chậm/sập giữa buổi live | Trung bình | Toàn bộ test là offline; mode `word` local; retry 5xx |
-| Rate limit / 429 | Thấp (chưa thấy) | Xử lý trong retry logic của `api.ts` |
-| Response thiếu slot / thứ tự lạ | Thấp | Dựng Feedback theo `slot`, assert đầy đủ |
-| `size` khác 5 | Thấp | Hỗ trợ trong API layer; từ điển chỉ có size 5 ⇒ throw message rõ |
-| Đã giải xong ở lượt 1 | Thấp | Kiểm tra all-correct **trước** khi lọc |
-| Benchmark chậm | Thấp | Cap minimax ở ≤300 candidate; benchmark chạy offline nên nhanh |
+| 1 | types, scorer, filter, unit tests | `apple`+`allee` = `cpppc`, `npm test` green |
+| 2 | strategy, words, solver **without** `probe.ts` | offline `apple`; `data/words5.txt` exists |
+| 3 | HTTP + CLI, no `bench.ts` / `probe.ts` import | `--target apple`, `--seed 1` → `fiery` |
+| 4 | `probe.ts` + wire solver | first non-dictionary demo: `zzzzz` or seed=38 → `agnew` |
+| 5 | thin English UI over the same `solve()` | `npm run web`; unused fields hidden |
+| 6 | README + credits | no invented bench numbers |
+
+If the recording is short: slices 1–4 are mandatory. Cut README length before cutting probe. Cut the UI before cutting probe.
 
 ---
 
-## 9. Outline README (deliverable — email chấm cả cái này)
+## 8. Risks
 
-1. **What it does** — 3 câu + một block output mẫu ngay đầu file.
-2. **Quick start** — `npm install` (chỉ devDeps) / `npm start -- --mode random` / `npm test`.
-3. **Hiểu API Votee** — bảng 3 endpoint, shape response, và bảng validation ở mục 5.1.
-4. **Phát hiện 1: `/random` stateless, cần seed** — kèm log 2 request khác nhau. *Đây phải là mục
-   nổi bật, nó là insight chính.*
-5. **Phát hiện 2: scoring là per-slot, không phải Wordle chuẩn** — kèm bảng so sánh ở mục 2 và cách
-   ta chứng minh (contract test).
-6. **Phát hiện 3: hệ quả bảo mật (26-guess reconstruction)** — nêu, kèm lý do không dùng.
-7. **Kiến trúc** — sơ đồ oracle/solver ở mục 0, và giải thích tại sao tách như vậy.
-8. **Thuật toán** — filter, positional frequency scoring, penalty chữ lặp, tie-break, opening word
-   được tính ra (không hardcode).
-9. **Kết quả** — bảng benchmark: tỉ lệ giải, số lượt trung bình, phân bố 1–6 lượt, so sánh
-   freq vs minimax.
-10. **Độ phức tạp** — `score` O(n²) với n=5 (thực chất hằng số); filter O(|C|·n²); heuristic
-    O(|C|·n); minimax O(|G|·|C|·n²) và lý do cap.
-11. **Testing** — offline vs live, cách chạy live (`npm run test:live`).
-12. **Attribution** — nguồn từ điển + license; The Dodgy Engineer; 3Blue1Brown; NYT Wordle tips;
-    ghi rõ AI assistance đã dùng và phần nào là quyết định của bạn. Email nói rõ về plagiarism —
-    minh bạch ở đây là *cộng điểm*, không phải trừ.
-13. **Limitations & future work** — chỉ size 5; heuristic không optimal; chưa dùng entropy đầy đủ /
-    two-step lookahead; dictionary gap.
+| Risk | Handling |
+| --- | --- |
+| Secret not in our dictionary | Probe (default). `DictionaryGapError` only when fallback is off |
+| Forgot to pin `seed` | Random oracle throws; CLI generates and prints |
+| Copy The Dodgy Engineer's product-of-gaps formula | It collapses on ties. Sum and maximise (section 5.4) |
+| Standard Wordle duplicate handling | Wrong vs this API (`cpppc` not `capac`) |
+| Network dies mid-session | Unit tests offline; retry 5xx only |
+| `size` ≠ 5 | API layer OK; dictionary is size 5 only → throw clearly |
+| Port 3000 already in use | Print how to kill the old process; do not dump a stack trace |
 
 ---
 
-## 10. Definition of Done
+## 9. README outline (the email grades this too)
 
-- [ ] `npm test` xanh, không cần mạng.
-- [ ] `npm run test:live` xanh, gồm contract test đối chiếu `score()` với API thật.
-- [ ] `--mode random` không truyền seed: in seed ra và giải được.
-- [ ] `--mode daily` giải được.
-- [ ] `--mode word --target vetch` giải được (từ hiếm).
-- [ ] Benchmark ≥ 97% giải trong 6 lượt, trung bình ≤ 4,4 lượt (mẫu 150 — xem mục 0.5).
-- [ ] `npm run typecheck` (`tsc --noEmit`) sạch, `strict: true`, **không có `any`** trong `src/`.
-- [ ] Không dùng `enum`/`namespace`/parameter property (type stripping sẽ crash — mục 4).
-- [ ] Runtime `dependencies` = **rỗng**; không có bước build.
-- [ ] Tổng LOC `src/` < 700, không file nào > 130 dòng (dry-run: 641 dòng, max 129).
-- [ ] `constraints.ts` không được import bởi `solver.ts` (chỉ `cli.ts` dùng).
-- [ ] README có đủ 13 mục, gồm cả 3 phát hiện về API.
-- [ ] Bạn giải thích được **từng file** trong 2 câu. Nếu không → xoá/đơn giản hoá file đó.
+1. What it does + a sample run.
+2. Quick start (`npm test`, `npm start -- --mode word --target apple`, `npm run web` if it exists).
+3. How the Votee API works (three endpoints, one oracle).
+4. Finding 1: `/random` is stateless — pin a seed.
+5. Finding 2: per-slot scoring, not Wordle.
+6. Finding 3: dictionary is ours; secrets miss the list; probe is the way out.
+7. Architecture (oracle / solver split).
+8. Algorithm (filter, entropy / minimax / freq, `tares`).
+9. Results — only numbers measured in this session (or say so).
+10. Testing (offline vs live).
+11. References: Shannon 1948, Knuth 1976, 3Blue1Brown, The Dodgy Engineer (**adapted**), NYT tips as background, word-list / SCOWL.
+12. Limitations. UI section only if `web/` exists.
 
 ---
 
-## Phụ lục A — Log kiểm chứng API (đã chạy thật, 2026-08-14)
+## 10. Definition of done
 
-Base: `https://wordle.votee.dev:8000` · Spec lấy từ `/openapi.json` (FastAPI 0.1.0).
-`GuessResult = {slot: int, guess: str, result: absent|present|correct}`; cả 3 endpoint trả `GuessResult[]`.
-Params: `/word/{word}?guess`; `/random?guess&size=5&seed`; `/daily?guess&size=5`.
+- [ ] `npm test` green, no network.
+- [ ] `npm run test:live` green, including the `score()` contract.
+- [ ] `--mode random` without `--seed` prints a seed and solves.
+- [ ] `--mode daily` solves.
+- [ ] `--mode word --target apple` and `--target zzzzz` solve.
+- [ ] `--mode random --seed 1` → `fiery`; `--seed 38` → `agnew`.
+- [ ] `npm run typecheck` clean; no `enum`; empty runtime `dependencies`.
+- [ ] `constraints.ts` is not imported by `solver.ts`.
+- [ ] README has the findings and references. No invented 4.22 unless a bench ran on camera.
+- [ ] You can explain each file in two sentences.
+
+---
+
+## Appendix A — Verified API log (live, 2026-08-14)
+
+Base: `https://wordle.votee.dev:8000` · spec from `/openapi.json` (FastAPI 0.1.0).
+`GuessResult = {slot, guess, result}`; all three endpoints return `GuessResult[]`.
 
 ```
-# --- Luật scoring: 5/5 dự đoán per-slot khớp tuyệt đối ---
-/word/tests?guess=ttttt  → c p p c p     (Wordle chuẩn: c a a c a)
-/word/apple?guess=eeeee  → p p p p c     (Wordle chuẩn: a a a a c)
-/word/apple?guess=pppaa  → p c c p p
-/word/apple?guess=zzzzz  → a a a a a
-/word/apple?guess=pzzzp  → p a a a p
-/word/tests?guess=tooot  → c a a a p
-/word/teyyy?guess=ttttt  → c p p p p
-/word/apple?guess=allee  → c p p p c     (Wordle chuẩn: c a p a c)
-/word/apple?guess=apple  → c c c c c
-/word/apple?guess=ARISE  → c a a a c     (uppercase được nhận, echo về lowercase)
+# Scoring: per-slot predictions matched 5/5
+/word/tests?guess=ttttt  → cppcp     (Wordle: caaca)
+/word/apple?guess=eeeee  → ppppc     (Wordle: aaaac)
+/word/apple?guess=pppaa  → pccpp
+/word/apple?guess=zzzzz  → aaaaa
+/word/apple?guess=pzzzp  → paaap
+/word/tests?guess=tooot  → caaap
+/word/teyyy?guess=ttttt  → cpppp
+/word/apple?guess=allee  → cpppc     (Wordle: capac)
+/word/apple?guess=apple  → ccccc
+/word/apple?guess=ARISE  → caaac     (uppercase accepted, echoed lower)
 
-# --- /random KHÔNG deterministic nếu thiếu seed (từ khác nhau giữa 2 request) ---
-/random?guess=arise&size=5          → a=present r=present i=absent s=absent e=absent
-/random?guess=arise&size=5          → a=absent   r=correct i=absent s=absent e=absent
+# /random without seed is a different secret each request
+/random?guess=arise&size=5          → present, present, absent, absent, absent
+/random?guess=arise&size=5          → absent, correct, absent, absent, absent
 
-# --- có seed thì deterministic (2 lần gọi giống hệt) ---
-/random?guess=arise&size=5&seed=1   → a=absent r=present i=present s=absent e=present
-/random?guess=arise&size=5&seed=1   → a=absent r=present i=present s=absent e=present
+# with seed it is deterministic
+/random?guess=arise&size=5&seed=1   → absent, present, present, absent, present
+/random?guess=arise&size=5&seed=1   → absent, present, present, absent, present
 
-# --- ground truth, tái tạo bằng 26 request aaaaa..zzzzz ---
+# ground truth via 26× aaaaa..zzzzz
 seed=1 → fiery    seed=42 → wrote    seed=777 → poise    daily(2026-08-14) → vetch
+seed=38 → agnew   (not in word-list)
 
-# --- validation ---
+# validation
 guess.length !== size        → 400
-guess có ký tự không phải chữ → 400
-seed âm                      → 500
-size = 4 hoặc 6              → OK
-/word/{target} không có size → OK (suy từ độ dài target)
+non-letter in guess          → 400
+negative seed                → 500
+size = 4 or 6                → OK
+/word/{target} without size  → OK
 ```
 
-## Phụ lục B — Những gì KHÔNG làm
+## Appendix B — Out of scope (2-hour recording)
 
-Web UI · React/Next · bước build (`tsc` sinh `dist/`, esbuild, vite) · `tsx`/`ts-node` · Vitest/Jest ·
-`chalk`/`yargs`/`axios`/`commander`/`lodash` · `enum`/`namespace`/decorator · `any` · dropdown "chọn
-endpoint" · nhiều lớp abstraction (interface/factory/DI container) · file sinh tự động khổng lồ ·
-LLM bên trong solver · Docker · hardcode `seed` trong logic solver · hardcode opening word ·
-copy-paste code từ `optimizing-wordle.md` · dùng constraint model để lọc (chỉ để hiển thị).
+Three-dropdown "API browser" · React/Next · a build step (`dist/`, esbuild, vite) · `tsx`/`ts-node` · Vitest/Jest · `chalk`/`yargs`/`axios`/`commander`/`lodash` · `enum`/`namespace`/decorators · `any` · DI containers · an LLM inside the solver · Docker · hardcoding `seed` inside the solver · hardcoding `soare` · copying The Dodgy Engineer's product-of-gaps formula · using the constraint model as the filter · inventing bench numbers that were not run on camera · a dark GitHub-style dashboard.
