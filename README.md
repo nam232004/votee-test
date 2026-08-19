@@ -1,9 +1,10 @@
 # Votee Wordle Solver
 
-A TypeScript program that **automatically guesses** the Votee Wordle-like puzzle at
-[`https://wordle.votee.dev:8000`](https://wordle.votee.dev:8000). The three endpoints
-(`/random`, `/daily`, `/word`) are not three features — they are three oracles with the
-same signature. One `solve(oracle)` loop talks to all of them.
+A TypeScript program that **automatically guesses** the Votee Wordle-like puzzle
+([API](https://wordle.votee.dev:8000/redoc)). The three endpoints (`/random`, `/daily`,
+`/word`) are not three features — they are three oracles with the same signature. One
+`solve(oracle)` loop talks to all of them. The brief is `/random`; the other two are the
+same algorithm with a different secret-holder.
 
 Requires **Node ≥ 22.18**. TypeScript runs directly (`node src/cli.ts`); no bundler, no
 runtime dependencies.
@@ -113,17 +114,28 @@ for `/word`. History replays as Wordle-coloured tiles.
 - No 1,000-game average is claimed here — that measurement was not run in this session.
   On dictionary words, entropy typically lands in about four to five guesses.
 
+## Tools and credit
+
+The hiring mail allows IDEs, chatbots, and LLMs. This repo was written in Cursor. The
+algorithm is not copied from another Votee solver. Ideas that came from papers, videos, or
+packages are listed below. The dictionary file is generated from an MIT-licensed word list
+and committed so a clone can run without that package.
+
 ## References
 
+- Votee, [Wordle-like API](https://wordle.votee.dev:8000/redoc) — the puzzle this program solves.
 - C. E. Shannon, “A Mathematical Theory of Communication,” *Bell System Technical Journal*, 1948
   (entropy of the feedback partition).
 - D. E. Knuth, “The Computer as Master Mind,” *Journal of Recreational Mathematics*, 1976
   (minimax: minimise the size of the largest remaining bucket).
-- 3Blue1Brown, “Solving Wordle using information theory,” 2022.
-- The Dodgy Engineer, positional-frequency Wordle heuristic, 2022 — **adapted**. The original
-  product-of-gaps formula collapses (one maxed slot zeroes the product and you get a pile of
-  ties). We **sum** per-slot counts and maximise, then multiply by `0.5 ** duplicates`.
-- New York Times, “Best Wordle Tips” — background only; we do not use Wordle’s 2,315-answer list
-  (`vetch` would be missing).
-- `word-list` / [SCOWL](http://wordlist.aspell.net/) (Kevin Atkinson). Runtime reads the
-  generated `data/words5.txt` only; the npm package is a **devDependency**.
+- Grant Sanderson (3Blue1Brown), [“Solving Wordle using information theory”](https://www.3blue1brown.com/lessons/wordle/),
+  2022 ([YouTube](https://www.youtube.com/watch?v=v68zYyaEmEA)).
+- The Dodgy Engineer, [“Solving Wordle in under 3 guesses with python”](https://wordle.plus/solving-wordle-in-under-3-guesses-with-python/),
+  2022 — positional frequency **adapted**. Their product-of-gaps formula collapses (one maxed
+  slot zeroes the product and you get a pile of ties). We **sum** per-slot counts and maximise,
+  then multiply by `0.5 ** duplicates`.
+- New York Times, [“Unwinding Wordle: Tips and Tricks”](https://www.nytimes.com/2024/06/10/crosswords/unwinding-wordle-tips.html)
+  — background only; we do not use Wordle’s 2,315-answer list (`vetch` would be missing).
+- Sindre Sorhus, [`word-list`](https://github.com/sindresorhus/word-list) (MIT), data from
+  [SCOWL](http://wordlist.aspell.net/) by Kevin Atkinson. Runtime reads committed
+  `data/words5.txt`; the npm package is a **devDependency** used only by `scripts/build-words.ts`.
