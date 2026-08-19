@@ -6,7 +6,3 @@ npm-debug.log*
 Thumbs.db
 coverage/
 
-# Tài liệu chuẩn bị cá nhân, không thuộc bài submit
-mail-moi-phong-van.md
-plan-phan-tich.md
-optimizing-wordle.md
