@@ -1,0 +1,25 @@
+{
+  "name": "votee-wordle-solver",
+  "version": "1.0.0",
+  "description": "Automatically solves the Votee Wordle-like API puzzle",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "start": "node src/cli.ts",
+    "build:words": "node scripts/build-words.ts",
+    "solve:random": "node src/cli.ts --mode random",
+    "solve:daily": "node src/cli.ts --mode daily",
+    "test": "node --test \"test/unit/*.test.ts\"",
+    "test:live": "node --test \"test/live/*.test.ts\"",
+    "web": "node src/server.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "typescript": "^7.0.2",
+    "word-list": "^4.1.0"
+  }
+}

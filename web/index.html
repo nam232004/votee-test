@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Votee Wordle Solver</title>
+    <style>
+      :root {
+        --correct: #6aaa64;
+        --present: #c9b458;
+        --absent: #787c7e;
+        --line: #d3d6da;
+      }
+      body {
+        font: 16px/1.5 system-ui, sans-serif;
+        max-width: 640px;
+        margin: 40px auto;
+        padding: 0 20px;
+        color: #1a1a1b;
+      }
+      h1 { font-size: 20px; letter-spacing: 0.02em; }
+      hr { border: 0; border-top: 1px solid var(--line); margin: 24px 0; }
+      label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 6px; }
+      .field { margin-bottom: 18px; }
+      .field[hidden] { display: none; }
+      .hint { font-size: 12px; color: #6b6b6b; margin: 6px 0 0; }
+      select, input, button {
+        font: inherit; padding: 8px 10px; border: 1px solid var(--line);
+        border-radius: 4px; width: 100%; box-sizing: border-box; background: #fff;
+      }
+      button { background: #1a1a1b; color: #fff; border-color: #1a1a1b; cursor: pointer; }
+      button:disabled { opacity: 0.45; cursor: default; }
+      .tiles { display: flex; gap: 4px; }
+      .tile {
+        width: 40px; height: 40px; display: grid; place-items: center;
+        color: #fff; font-weight: 700; text-transform: uppercase; border-radius: 3px;
+      }
+      .correct { background: var(--correct); }
+      .present { background: var(--present); }
+      .absent { background: var(--absent); }
+      .step {
+        display: flex; gap: 16px; align-items: center;
+        padding: 10px 0; border-bottom: 1px solid #eee;
+      }
+      .meta { font-size: 13px; color: #555; }
+      .status { font-weight: 600; margin-top: 16px; }
+      .error { color: #b00020; }
+      code { background: #f4f4f5; padding: 1px 5px; border-radius: 3px; font-size: 13px; }
+    </style>
+  </head>
+  <body>
+    <h1>Votee Wordle Solver</h1>
+    <p class="meta">
+      This page calls the same solver as the CLI. Every guess goes to the live API at
+      <code>wordle.votee.dev</code>.
+    </p>
+    <hr />
+    <div class="field">
+      <label for="mode">1 · Choose a puzzle</label>
+      <select id="mode">
+        <option value="random">/random — server picks the word; we do not know it</option>
+        <option value="daily">/daily — today's puzzle</option>
+        <option value="word">/word — we pick the answer, for a controlled test</option>
+      </select>
+      <p class="hint" id="mode-hint"></p>
+    </div>
+    <div class="field" id="seed-field">
+      <label for="seed">2 · Seed</label>
+      <input id="seed" type="number" min="0" placeholder="leave empty to generate one — try 1, 42, 777" />
+      <p class="hint">
+        The API has no session: without a seed every request is a different secret, so we pin one
+        seed for the whole run.
+      </p>
+    </div>
+    <div class="field" id="target-field">
+      <label for="target">2 · Answer</label>
+      <input id="target" placeholder="e.g. apple" maxlength="5" />
+      <p class="hint">
+        We choose the answer, so this is a controlled test. It does not have to be a real word —
+        <code>kshjc</code> or <code>zzzzz</code> still solve. Letters a–z only; the API will not
+        accept anything else as a guess.
+      </p>
+    </div>
+    <div class="field">
+      <label for="strategy" id="label-strategy">3 · Guess-selection strategy</label>
+      <select id="strategy">
+        <option value="entropy">entropy — default (information gain)</option>
+        <option value="minimax">minimax — worst case (Knuth)</option>
+        <option value="freq">freq — cheap fallback when the list is still huge</option>
+      </select>
+    </div>
+    <div class="field">
+      <button id="solve">Solve</button>
+      <p class="hint" id="url-hint"></p>
+    </div>
+    <hr />
+    <div id="steps"></div>
+    <p id="status" class="status"></p>
+    <script type="module">
+      const API = location.port === '3000' ? '' : 'http://localhost:3000';
+      const el = (id) => document.getElementById(id);
+      const steps = el('steps');
+      const status = el('status');
+      const tiles = (guess, feedback) =>
+        feedback.map((mark, i) => `<div class="tile ${mark}">${guess[i]}</div>`).join('');
+
+      function renderStep(step) {
+        const solved = step.feedback.every((mark) => mark === 'correct');
+        const detail =
+          step.phase !== 'probe'
+            ? `${step.remaining.toLocaleString('en-US')} candidates left`
+            : solved
+              ? 'API confirmed all 5 slots'
+              : step.unresolvedSlots === 0
+                ? 'all 5 slots known — next guess submits the word'
+                : `${step.unresolvedSlots} slots still open`;
+        const node = document.createElement('div');
+        node.className = 'step';
+        node.innerHTML = `<div class="tiles">${tiles(step.guess, step.feedback)}</div>
+          <div class="meta">#${step.attempt} · ${detail}</div>`;
+        steps.append(node);
+      }
+
+      function renderPhaseNotice() {
+        const node = document.createElement('p');
+        node.className = 'hint';
+        node.style.margin = '14px 0';
+        node.textContent =
+          'Secret is not in the dictionary. Switching to per-slot letter probes — slower, but it always finishes.';
+        steps.append(node);
+      }
+
+      async function run() {
+        const button = el('solve');
+        button.disabled = true;
+        steps.replaceChildren();
+        status.className = 'status';
+        status.textContent = 'Calling the API…';
+        const mode = el('mode').value;
+        const params = new URLSearchParams({ mode, strategy: el('strategy').value });
+        if (mode === 'random' && el('seed').value) params.set('seed', el('seed').value);
+        if (mode === 'word') params.set('target', el('target').value.trim());
+        try {
+          const response = await fetch(`${API}/api/solve?${params}`);
+          const data = await response.json();
+          if (!response.ok) throw new Error(data.error);
+          let phase = 'inference';
+          for (const step of data.history) {
+            if (step.phase !== phase) {
+              phase = step.phase;
+              renderPhaseNotice();
+            }
+            renderStep(step);
+            await new Promise((resolve) => setTimeout(resolve, data.history.length > 8 ? 120 : 350));
+          }
+          const seed = data.seed ? ` · seed ${data.seed}` : '';
+          status.textContent = data.solved
+            ? `Solved "${data.answer}" in ${data.attempts} guesses${seed}`
+            : `Not solved in ${data.attempts} guesses${seed}`;
+        } catch (error) {
+          status.className = 'status error';
+          status.textContent = `Error: ${error.message}`;
+        } finally {
+          button.disabled = false;
+        }
+      }
+
+      const MODES = {
+        random: { hint: 'The server picks a random word and only returns colours. The solver has to infer it.' },
+        daily: { hint: 'One hidden word for today. Also not revealed.' },
+        word: { hint: 'The server scores guesses against the answer we supply.' },
+      };
+
+      function syncForm() {
+        const mode = el('mode').value;
+        el('seed-field').hidden = mode !== 'random';
+        el('target-field').hidden = mode !== 'word';
+        el('mode-hint').textContent = MODES[mode].hint;
+        el('label-strategy').textContent = `${mode === 'daily' ? 2 : 3} · Guess-selection strategy`;
+        const target = el('target').value.trim().toLowerCase();
+        el('solve').disabled = mode === 'word' && !/^[a-z]{5}$/.test(target);
+        el('url-hint').textContent = `Will call: GET ${describeEndpoint(mode, target)}`;
+      }
+
+      function describeEndpoint(mode, target) {
+        if (mode === 'word') return `/word/${target || '{answer}'}?guess=…`;
+        if (mode === 'daily') return '/daily?guess=…&size=5';
+        return `/random?guess=…&size=5&seed=${el('seed').value || '{generated}'}`;
+      }
+
+      el('solve').addEventListener('click', run);
+      for (const id of ['mode', 'seed', 'target']) el(id).addEventListener('input', syncForm);
+      syncForm();
+    </script>
+  </body>
+</html>
