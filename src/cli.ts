@@ -86,7 +86,7 @@ if (mode === 'random') {
   oracle = createLocalOracle(target.trim().toLowerCase());
   header = `mode=offline  target=${target.trim().toLowerCase()}  strategy=${strategy}`;
 } else {
-  usage(`unknown mode "${mode}" (no --mode bench)`);
+  usage(`unknown mode "${mode}"`);
 }
 
 console.log(header);
@@ -116,5 +116,5 @@ if (result.solved) {
   process.exit(0);
 }
 
-console.log('Not solved within the dictionary budget.');
+console.log('Not solved.');
 process.exit(1);
