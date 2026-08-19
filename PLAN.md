@@ -1,11 +1,8 @@
 ﻿# PLAN — Votee Wordle Solver (TypeScript, zero build step, zero runtime deps)
 
 > This is an **execution spec**, not code. Every API claim here was **verified with live
-> requests** (Appendix A) — not guessed.
->
-> The plan was dry-run on branch `dry-run`: full implementation, unit + live tests green,
-> 1,000-game bench. Section 0.5 lists where the first draft was wrong and the numbers to use
-> instead. Read that first.
+> requests** (Appendix A) — not guessed. Read this to understand *why* the modules exist;
+> `README.md` is how to run them.
 
 ---
 
@@ -39,32 +36,7 @@ solver(oracle) ─────┼── randomOracle(seed)   → /random?seed=�
 
 The solver **does not know** which endpoint it is talking to. That is the live-coding pitch: the same algorithm runs against a known-answer test *and* a hidden puzzle.
 
-**Product of the 2-hour recording:** solver + CLI (and tests). A thin English page that calls the **same** `solve()` is welcome if time remains — it is not a second algorithm, and it is not three features.
-
----
-
-## 0.5 Dry-run results — what this plan got wrong
-
-Architecture held. **The guessed numbers did not.** Use the measured column, not the original guesses later in the file.
-
-| Plan said | Measured | Action |
-| --- | --- | --- |
-| Default strategy `freq` | `freq` solves **90.7%** in 6 guesses | **Default `entropy` (99.0%)**. `freq` only when > 300 candidates |
-| Bench ≥ 99% and ≤ 4.2 guesses | `entropy`: **99.0%**, **4.22** guesses (n=1,000) | Test bar: ≥ 97% and ≤ 4.4 (n=150) |
-| Minimax is the biggest bonus | minimax **99.7%** but **4.29** guesses — worse average than entropy | Ship all three; default `entropy`. Minimax is still worth talking about (worst case) |
-| Raising the partition cap helps | Cap 2,000: **4.20 vs 4.17** — no win, 2× slower | Keep 300. Good "measure before you optimise" story |
-| Opening word matters, must cache | `tares` (6.2024 bits) beats heuristic `cares` by **0.01** guesses | Still compute it (cheap, and "I computed this" lands well); don't expect a miracle |
-| Full-dictionary opening sweep is "too slow" | **3 seconds** with base-3 pattern codes + typed arrays | Cache is convenience, not a requirement |
-| Dictionary ~15,000 words | **12,578** from `word-list`, contains all 4 ground-truth words | Keep this source |
-| `npm test` = `node --test test/unit/` | Node 22 treats a directory path as a module ⇒ **error** | Glob: `node --test "test/unit/*.test.ts"` |
-| Gate live tests with `VOTEE_LIVE=1` | Setting env cross-platform on Windows is messy | Split `test/unit/` and `test/live/`, two scripts. No env var |
-| `src/` < 700 lines, each file ≤ 120 | **641** lines; `cli.ts` 124, `strategy.ts` 129 | Split bench into `src/bench.ts`. Limit ≤ 130 |
-| Empty candidates → throw and stop | API secrets include proper nouns (`agnew`, `votee`) | Default `fallback=true` → `resolveByProbing` (`src/probe.ts`). Throw `DictionaryGapError` only when fallback is off (bench) |
-| No web UI | A thin page over the same solver is useful to show three oracles | Optional slice 5. Same `solve()`. English copy. Hide unused fields |
-
-Two things the plan **got right**, and they are the highest-value findings: `/random` needs a pinned seed (otherwise the solver never converges), and scoring is per-slot (10/10 contract cases match the live API).
-
-A finding that only showed up in the bench: **every inference miss is a family that differs by one slot** — `cases`, `doves`, `epees`, `gills`, `gyves`, `nines`, `pined`, `sagos`, `saris`, `sazes`. For `doves`, no guess splits `doves`/`doges`/`doses`/`dozes`/`dotes` because the distinguishing letters cannot all sit in one 5-letter word. That is a 6-guess budget limit, not a bug — and a ready answer to "why not 100%?". With probe on, those words still finish; the bench turns fallback off to measure inference alone.
+**What to ship:** solver + CLI + tests. A thin English page that calls the **same** `solve()` is welcome — it is not a second algorithm, and it is not three features.
 
 ---
 
@@ -81,7 +53,7 @@ GET /random?guess=arise&size=5   → a=absent   r=correct i=absent s=absent e=ab
 
 **Hard requirement:** in `random` mode, if the user does not pass `--seed`, the CLI **generates one positive integer once at the start of the session**, prints it, and reuses it for **every** guess. The word is still chosen by the server (we do not know it); the problem is well-posed.
 
-> Highest-value live beat. Most candidates either miss this, or their solver "never converges" and they do not know why. Say it out loud on camera.
+> Highest-value finding. Most solvers miss this, or they "never converge" and do not know why.
 
 ---
 
@@ -124,13 +96,13 @@ Keep **zero runtime dependencies**:
 2. Write `data/words5.txt` and **commit it**. Runtime is `readFile` only.
 3. Credit source + license in README (the email is explicit about plagiarism).
 
-> **Dry-run:** `word-list` yields **12,578** five-letter words and contains `fiery`, `wrote`, `poise`, `vetch`. Keep this source. It does **not** contain `agnew` / `votee` — that is why probe exists.
+`word-list` yields **12,578** five-letter words and contains `fiery`, `wrote`, `poise`, `vetch`. Keep this source. It does **not** contain `agnew` / `votee` — that is why probe exists.
 
 **Acceptance (fail the source if any of these miss):**
 
 - Size between 10,000 and 20,000.
 - Contains all four ground-truth words: `fiery`, `wrote`, `poise`, **`vetch`**.
-- Offline entropy on dictionary words typically ~4–5 guesses; do not invent a 1,000-game average in README unless this session ran a bench.
+- Offline entropy on dictionary words typically ~4–5 guesses. Do not invent a large-n average in README unless this repo actually ran a bench.
 
 ---
 
@@ -162,8 +134,7 @@ votee-wordle-solver/
 │   ├── words5.txt
 │   └── opening.json          # { "word": "tares", "bits": 6.2024 }
 ├── scripts/
-│   ├── build-words.ts
-│   └── best-opening.ts       # optional; too slow for the 2-hour recording
+│   └── build-words.ts
 ├── src/
 │   ├── types.ts
 │   ├── api.ts
@@ -173,7 +144,6 @@ votee-wordle-solver/
 │   ├── strategy.ts
 │   ├── solver.ts
 │   ├── probe.ts              # dictionary-free fallback
-│   ├── bench.ts              # optional; skip in the 2-hour recording
 │   ├── words.ts
 │   ├── cli.ts
 │   └── server.ts             # slice 5: thin UI over the same solve()
@@ -280,17 +250,9 @@ If `|C| > 300`, skip partitioning and use `freq`. If `|C| ≤ 30` and `attemptsL
 
 Tie-break: prefer a guess still in `candidates`, then alphabetical.
 
-Opening word: **not** Wordle's `soare` (7th here). Computed: **`tares` — 6.2024 bits**. Write `data/opening.json`; do not run the full sweep during the 2-hour recording.
+Opening word: **not** Wordle's `soare`. On this dictionary **`tares` is 6.2024 bits** (`data/opening.json`).
 
-Measured **offline, before the recording** (same sample, same opening). Do not paste these into README unless this session ran a bench:
-
-| Strategy | n | Solved | Avg guesses | Time |
-| --- | --- | --- | --- | --- |
-| `entropy` | 1000 | **99.0%** | **4.22** | 39.7s |
-| `minimax` | 300 | 99.7% | 4.29 | 12.4s |
-| `freq` | 300 | 90.7% | 4.28 | 0.6s |
-
-Default **entropy**. `freq` is the cheap fallback above 300 candidates.
+Default **entropy**. `freq` is the cheap fallback above 300 candidates. Qualitative: dictionary words typically finish in about four to five guesses; probe is slower but always finishes. Some six-guess misses are families that differ by one slot (e.g. `doves` / `doges` / `doses`) — a budget limit, not a search bug; probe still finishes them.
 
 ### 5.5 `src/words.ts`
 
@@ -300,21 +262,21 @@ Default **entropy**. `freq` is the cheap fallback above 300 candidates.
 
 Oracle-agnostic loop. `maxAttempts` 6 for the dictionary phase. No `console.log` (use `onProgress`).
 
-If candidates empty and `fallback === false` → `DictionaryGapError`. If `fallback === true` (default) → `resolveByProbing` (after slice 4; before that, return unsolved — do not import `probe.ts` yet).
+If candidates empty and `fallback === false` → `DictionaryGapError`. If `fallback === true` (default) → `resolveByProbing`.
 
 ### 5.7 `src/probe.ts`
 
 Per-slot scoring means one guess is five letter tests. Track `fixed`, `absent`, `bannedAt`, `floating`. `deduce()`: a present letter with only one legal slot is placed immediately. Reuse settled slots to park untested letters. Cap 40. Optional all-green confirmation submit.
 
-First on-camera demo of a missing dictionary word is **`zzzzz`** or **seed=38 → `agnew`**. Do not assume `votee` was already run.
+A missing dictionary word to demo: **`zzzzz`** or **seed=38 → `agnew`**. `votee` is optional.
 
 ### 5.8 `src/cli.ts`
 
-`node:util` `parseArgs`. Modes: `random | daily | word | offline`. Print the seed. ANSI colours, no `chalk`. Exit 0 / 1 / 2. Do not import `bench.ts` / `probe.ts` in slice 3.
+`node:util` `parseArgs`. Modes: `random | daily | word | offline`. Print the seed. ANSI colours, no `chalk`. Exit 0 / 1 / 2. The CLI does not import `probe.ts`; the solver does.
 
 ### 5.9 `src/server.ts` + `web/index.html` (slice 5)
 
-`node:http`. `GET /api/solve?mode=&strategy=&seed=&target=` returns JSON `{ ...solve result, seed, dictionarySize }`. Serve `web/index.html` at `/`. Same `solve()` as the CLI — no algorithm in the browser. Light Wordle colours. Numbered fields. Hide seed unless `/random`, hide target unless `/word`. English copy. No dark dashboard. No invented 99% / 4.22 in the UI.
+`node:http`. `GET /api/solve?mode=&strategy=&seed=&target=` returns JSON `{ ...solve result, seed, dictionarySize }`. Serve `web/index.html` at `/`. Same `solve()` as the CLI — no algorithm in the browser. Light Wordle colours. Numbered fields. Hide seed unless `/random`, hide target unless `/word`. English copy. No dark dashboard. No invented bench numbers in the UI.
 
 ---
 
@@ -339,7 +301,7 @@ All logic tests **offline**. Live tests opt-in (`npm run test:live`) so a dead n
 
 ### 6.2–6.4
 
-Filter: the true target always survives; `absent` drops that letter everywhere; all-correct leaves one word. Strategy: deterministic; one candidate returns it; freq penalises repeats. Solver (slice 2): local oracle solves `apple` / `fiery`; do not test `zzzzz` yet. After probe: `zzzzz` still solves; `fallback: false` on a missing word throws `DictionaryGapError`.
+Filter: the true target always survives; `absent` drops that letter everywhere; all-correct leaves one word. Strategy: deterministic; one candidate returns it; freq penalises repeats. Solver: local oracle solves `apple` / `fiery`. Probe: `zzzzz` still solves; `fallback: false` on a missing word throws `DictionaryGapError`.
 
 ### 6.5 `test/live/api.test.ts`
 
@@ -353,20 +315,18 @@ Slice 4 **add**: seed=38 → `agnew` and history has `phase === 'probe'`. Option
 
 ---
 
-## 7. Live-coding order (2-hour recording)
+## 7. Build order (how the modules landed)
 
-Ship a working demo early. Each slice ends in a committable state. **Do not dump the whole tree in one prompt.**
+Ship a working demo early. Each slice is a committable state.
 
 | Slice | What | Done when |
 | --- | --- | --- |
 | 1 | types, scorer, filter, unit tests | `apple`+`allee` = `cpppc`, `npm test` green |
-| 2 | strategy, words, solver **without** `probe.ts` | offline `apple`; `data/words5.txt` exists |
-| 3 | HTTP + CLI, no `bench.ts` / `probe.ts` import | `--target apple`, `--seed 1` → `fiery` |
-| 4 | `probe.ts` + wire solver | first non-dictionary demo: `zzzzz` or seed=38 → `agnew` |
+| 2 | strategy, words, solver (probe comes next) | offline `apple`; `data/words5.txt` exists |
+| 3 | HTTP + CLI | `--target apple`, `--seed 1` → `fiery` |
+| 4 | `probe.ts` + wire solver | non-dictionary demo: `zzzzz` or seed=38 → `agnew` |
 | 5 | thin English UI over the same `solve()` | `npm run web`; unused fields hidden |
 | 6 | README + credits | no invented bench numbers |
-
-If the recording is short: slices 1–4 are mandatory. Cut README length before cutting probe. Cut the UI before cutting probe.
 
 ---
 
@@ -411,7 +371,7 @@ If the recording is short: slices 1–4 are mandatory. Cut README length before 
 - [ ] `--mode random --seed 1` → `fiery`; `--seed 38` → `agnew`.
 - [ ] `npm run typecheck` clean; no `enum`; empty runtime `dependencies`.
 - [ ] `constraints.ts` is not imported by `solver.ts`.
-- [ ] README has the findings and references. No invented 4.22 unless a bench ran on camera.
+- [ ] README has the findings and references. No invented large-n bench unless this repo ran one.
 - [ ] You can explain each file in two sentences.
 
 ---
@@ -454,6 +414,6 @@ size = 4 or 6                → OK
 /word/{target} without size  → OK
 ```
 
-## Appendix B — Out of scope (2-hour recording)
+## Appendix B — Out of scope
 
-Three-dropdown "API browser" · React/Next · a build step (`dist/`, esbuild, vite) · `tsx`/`ts-node` · Vitest/Jest · `chalk`/`yargs`/`axios`/`commander`/`lodash` · `enum`/`namespace`/decorators · `any` · DI containers · an LLM inside the solver · Docker · hardcoding `seed` inside the solver · hardcoding `soare` · copying The Dodgy Engineer's product-of-gaps formula · using the constraint model as the filter · inventing bench numbers that were not run on camera · a dark GitHub-style dashboard.
+Three-dropdown "API browser" · React/Next · a build step (`dist/`, esbuild, vite) · `tsx`/`ts-node` · Vitest/Jest · `chalk`/`yargs`/`axios`/`commander`/`lodash` · `enum`/`namespace`/decorators · `any` · DI containers · an LLM inside the solver · Docker · hardcoding `seed` inside the solver · hardcoding `soare` · copying The Dodgy Engineer's product-of-gaps formula · using the constraint model as the filter · inventing bench numbers this repo did not measure · a dark GitHub-style dashboard.
